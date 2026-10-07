@@ -265,7 +265,7 @@ public final class SelfTest {
     }
 
     private static void actionRoutingTests() {
-        // three equal buttons per cell: border 2px + 3px gaps between
+        // two equal buttons per cell: 2px inset + 3px gap
         for (int width : new int[]{200, 333, 360, 500}) {
             int count = ScopeHighlighterTab.ACTIONS.length;
             int gap = 3;
@@ -278,11 +278,17 @@ public final class SelfTest {
                     all = false;
                 }
             }
-            check("actions: all three buttons routable at width " + width, all);
+            check("actions: all buttons routable at width " + width, all);
         }
+        int count = ScopeHighlighterTab.ACTIONS.length;
         check("actions: first button left edge", ScopeHighlighterTab.actionIndexForCellX(2, 360) == 0);
-        check("actions: last button right edge", ScopeHighlighterTab.actionIndexForCellX(357, 360) == 2);
-        check("actions: gap maps to nearest button", ScopeHighlighterTab.actionIndexForCellX(120, 360) == 1);
+        check("actions: last button right edge",
+                ScopeHighlighterTab.actionIndexForCellX(357, 360) == count - 1);
+        // gap between the two buttons maps to the nearer one
+        int buttonWidth = (360 - 4 - 3) / count;
+        int justLeftOfSecond = 2 + (buttonWidth + 3) - 1;
+        check("actions: gap maps to nearest button",
+                ScopeHighlighterTab.actionIndexForCellX(justLeftOfSecond, 360) == 1);
     }
 
     private static void organizerSyncTests() {

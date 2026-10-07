@@ -53,20 +53,23 @@ import java.util.List;
  */
 public final class ScopeHighlighterTab extends JPanel {
 
-    /** The three Action-column buttons. */
+    /** The two Action-column buttons. */
     public enum RowAction {
-        COPY("copy endpoint", new Color(0x54, 0x6E, 0x7A), new Color(0x78, 0x90, 0x9C)),
-        SHOW_ALL("show all", new Color(0x2E, 0x7D, 0x32), new Color(0x43, 0xA0, 0x47)),
-        TO_ORGANIZER("notes to organizer", new Color(0xE6, 0x51, 0x00), new Color(0xFB, 0x8C, 0x00));
+        // Burp's default orange
+        SHOW_ALL("Show Requests", new Color(0xFF, 0x66, 0x33), new Color(0xFF, 0x7A, 0x50), true),
+        // no color: plain button look
+        TO_ORGANIZER("Notes Organizer", new Color(0xED, 0xED, 0xED), new Color(0xF6, 0xF6, 0xF6), false);
 
         private final String label;
         private final Color base;
         private final Color hover;
+        private final boolean colored;
 
-        RowAction(String label, Color base, Color hover) {
+        RowAction(String label, Color base, Color hover, boolean colored) {
             this.label = label;
             this.base = base;
             this.hover = hover;
+            this.colored = colored;
         }
 
         public String label() {
@@ -83,6 +86,19 @@ public final class ScopeHighlighterTab extends JPanel {
 
         public Color pressed() {
             return base.darker();
+        }
+
+        /** Colored buttons get white text; the plain one gets dark text. */
+        public boolean colored() {
+            return colored;
+        }
+
+        public Color textColor() {
+            return colored ? Color.WHITE : new Color(0x3C, 0x3C, 0x3C);
+        }
+
+        public Color borderColor() {
+            return colored ? new Color(255, 255, 255, 70) : new Color(0xC2, 0xC2, 0xC2);
         }
     }
 
@@ -415,9 +431,6 @@ public final class ScopeHighlighterTab extends JPanel {
             return;
         }
         switch (ACTIONS[actionIndex]) {
-            case COPY:
-                onCopyEndpoint(row);
-                break;
             case SHOW_ALL:
                 openResults(row, Source.ALL);
                 break;
@@ -507,13 +520,13 @@ public final class ScopeHighlighterTab extends JPanel {
                 Color bottom = pressed ? ACTIONS[i].base() : ACTIONS[i].base().darker();
                 g2.setPaint(new GradientPaint(x, y, top, x, y + h, bottom));
                 g2.fillRoundRect(x, y + (pressed ? 1 : 0), buttonWidth, h - (pressed ? 1 : 0), 8, 8);
-                g2.setColor(new Color(255, 255, 255, pressed ? 40 : 70));
+                g2.setColor(ACTIONS[i].borderColor());
                 g2.drawRoundRect(x, y + (pressed ? 1 : 0), buttonWidth, h - (pressed ? 1 : 0), 8, 8);
                 String text = ACTIONS[i].label();
                 int textWidth = g2.getFontMetrics().stringWidth(text);
                 int textX = x + Math.max(2, (buttonWidth - textWidth) / 2);
                 int textY = y + (h + g2.getFontMetrics().getAscent() - g2.getFontMetrics().getDescent()) / 2 + (pressed ? 1 : 0);
-                g2.setColor(Color.WHITE);
+                g2.setColor(ACTIONS[i].textColor());
                 g2.drawString(text, textX, textY);
             }
             g2.dispose();
