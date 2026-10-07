@@ -3,7 +3,7 @@
 A Burp Suite extension (Montoya API, Java) that **auto-highlights requests in
 Burp history** based on endpoint groups you define, each with its own title and
 Burp highlight color — and works as a **per-endpoint request logger** for
-Repeater, Intruder, Proxy history and Target.
+Repeater, Intruder, Proxy history and Target, with automatic Organizer sync.
 
 Built for bug bounty / pentest workflows where you manage scope endpoints in
 Excel and want a fast visual split in Burp — e.g. "Hiring Stage" in red,
@@ -20,12 +20,11 @@ Excel and want a fast visual split in Burp — e.g. "Hiring Stage" in red,
 2. **"Scope Highlighter" tab** — an Excel-like grid:
 
    ```
-   | #  | Endpoint / Group                    | Color | Match  | Action                                            |
-   | G1 | Hiring Stage  (2 endpoints)         | Red   | Prefix | [show all][repeater][intruder][history][target]    |
-   | 1  |     https://example.com/hiring-...  | Red   | Prefix | [show all][repeater][intruder][history][target]    |
-   | 2  |     /hiring-detail/admin            | Red   | Prefix | [show all][repeater][intruder][history][target]    |
-   | G2 | Candidate Detail  (1 endpoint)      | Blue  | Regex  | [show all][repeater][intruder][history][target]    |
-   | 1  |     https://example.com/candidate.. | Blue  | Regex  | [show all][repeater][intruder][history][target]    |
+   | #  | Endpoint / Group                    | Color | Match  | Action                                     |
+   | G1 | Hiring Stage  (2 endpoints)         | Red   | Prefix | [copy endpoint][show all][notes to organizer]|
+   | 1  |     https://example.com/hiring-...  | Red   | Prefix | [copy endpoint][show all][notes to organizer]|
+   | 2  |     /hiring-detail/admin            | Red   | Prefix | [copy endpoint][show all][notes to organizer]|
+   | G2 | Candidate Detail  (1 endpoint)      | Blue  | Regex  | [copy endpoint][show all][notes to organizer]|
    ```
 
    Add groups with title, color (Burp's 9 highlight colors), match mode and
@@ -35,26 +34,43 @@ Excel and want a fast visual split in Burp — e.g. "Hiring Stage" in red,
    from Excel into the group's endpoint box. Newlines, tabs (Excel columns) and
    commas are all treated as separators. Duplicates are removed, `#` comments
    ignored.
-4. **Request logger + "show" reveal** — every request is recorded with its tool
-   of origin. Clicking any Action button on a row opens the results window for
-   that endpoint (or the whole group), where you can reveal:
-   - **show all** — everything recorded for the endpoint
-   - **repeater** — all Repeater requests of that endpoint
-   - **intruder** — all Intruder requests of that endpoint
-   - **history** — all Proxy history requests of that endpoint
-   - **target** — all requests of that endpoint in the Target/site map
+4. **Three row actions**
+   - **copy endpoint** — copies the endpoint (or the whole endpoint list on a
+     group row) to the clipboard.
+   - **show all** — opens the reveal window (see below).
+   - **notes to organizer** — sends every recorded request of that row to
+     Burp's Organizer, noted with the group title and highlighted in the group
+     color (duplicates are never sent twice).
+5. **Left-click behaviour**
+   - group row: just selects (double-click edits the group)
+   - endpoint row: opens a Burp-style context menu — **Send to Repeater**,
+     **Send to Intruder**, **Send to Organizer**, **Copy endpoint**,
+     **Show all**. (Sends use the most recent recorded request of that
+     endpoint, so method/body are preserved.)
+6. **"show all" reveal window** — every recorded request of the endpoint:
+   - source chooser: **show all / repeater / intruder / target / proxy history**
+   - messages rendered in **Burp's own message editors** (Pretty / Raw / Hex),
+     like Burp's search history — with the search term highlighted
+   - **Inspector-style details pane** (method, URL, status, query parameters,
+     request headers) and the **Notes** of the message
+   - **live refresh**: every upcoming request of that endpoint appears
+     automatically while the window is open (Repeater + Intruder included)
+   - rows tinted with the group color, per-source counts, live text filter
+7. **Request logger, saved with the project** — every request is recorded with
+   its tool of origin and persisted into the Burp project file, so Repeater and
+   Intruder requests survive save/reload — Burp itself keeps no history API for
+   those tools. The log holds the most recent 3000 requests (oldest dropped
+   first); oversized bodies are truncated at 200 KB. Existing Proxy history is
+   imported on first load.
+8. **Auto-add to Organizer** (toolbar checkbox, on by default) — every request
+   matching a group is sent to the Organizer automatically, noted with the
+   group title and highlighted in the group color.
 
-   Each row shows time, source, method, URL, status and length, with the raw
-   **Request** and **Response** panes below — so you never need to hunt the
-   request down again. The window has a live text filter and per-source counts.
-   Rows are tinted with the group's color.
-5. **Saved with the project** — the request log is persisted into the Burp
-   project file (throttled while running, flushed on unload), so Repeater and
-   Intruder requests survive project save/reload — even though Burp itself
-   keeps no history API for those tools. The log holds the most recent 3000
-   requests (oldest dropped first); oversized bodies are truncated at 200 KB.
-6. Optional: write the group title into the **Notes** column (only when the
-   note is empty).
+   *Limitation:* the Montoya API (even in 2026.x) does not expose Organizer
+   **collections** — the group title is written into each item's *Notes*,
+   which is the closest grouping mechanism available to extensions.
+9. Optional: write the group title into the history **Notes** column (only
+   when the note is empty).
 
 ## Install
 
@@ -76,8 +92,9 @@ The **Scope Highlighter** tab appears in Burp's top tab bar.
    and **Match mode**, then paste your endpoints from Excel.
 3. Click **Add**. Existing and new traffic matching the group is highlighted
    immediately — no confirmation needed.
-4. Click any **action** button on a group or endpoint row to reveal its
-   recorded requests.
+4. Click **show all** on a row to reveal its recorded requests; **copy
+   endpoint** and **notes to organizer** are next to it. Left-click an
+   endpoint row for the Burp-style context menu.
 5. **Delete** removes the selected group — or just the selected endpoint row,
    keeping the rest of the group.
 
@@ -111,23 +128,30 @@ Prefix matching is case-insensitive and segment-aware: `/admin/career` matches
 - When a group no longer matches a request (edited/removed), its highlight and
   its group-name note are cleaned up automatically (a note you wrote yourself
   is never touched).
+- Recording starts when the extension loads: past Repeater/Intruder requests
+  from before the extension was loaded cannot be recovered (Burp keeps no
+  history for them) — load the extension at the start of a session and
+  everything is recorded.
 
 ## Project layout
 
 ```
 build.sh                                  build the jar (downloads Montoya API if needed)
-test.sh                                   headless self-test (61 checks)
+test.sh                                   headless self-test (79 checks)
 src/main/java/scopehighlighter/
-  ScopeHighlighterExtension.java          entry point, collect/auto-highlight wiring
+  ScopeHighlighterExtension.java          entry point, host bridge, organizer sync
   http/HighlighterHandler.java            auto-highlight + request recording on live traffic
   log/MessageLog.java                     request logger (persisted in project file)
-  log/MessageRecord.java                  one recorded exchange
-  log/Source.java                         show all / repeater / intruder / history / target
+  log/MessageRecord.java                  one recorded exchange (with notes)
+  log/Source.java                         show all / repeater / intruder / target / proxy history
+  organizer/OrganizerSync.java            organizer dedupe state (persisted)
   model/ScopeGroup.java                   group + URL matching
   model/MatchMode.java                    Prefix / Contains / Regex
   model/GroupStore.java                   groups + settings persistence, change listener
-  ui/ScopeHighlighterTab.java             the Excel-like grid + Action column
-  ui/ResultsFrame.java                    reveal window (recorded requests + raw req/resp)
+  ui/ScopeHighlighterTab.java             the Excel-like grid + Action column + context menu
+  ui/ResultsFrame.java                    show all window (sources, editors, inspector, notes)
+  ui/BurpMessageViewer.java               Burp message editors (Pretty/Raw/Hex) with fallback
+  ui/MessageViewer.java                   viewer abstraction
   ui/GroupDialog.java                     add/edit dialog (Excel paste box)
   ui/Host.java                            UI <-> Burp bridge
   util/EndpointParser.java                Excel paste parsing
@@ -141,9 +165,10 @@ src/test/java/scopehighlighter/SelfTest.java
 ```
 
 Runs a headless self-test of the paste parser, URL matcher, group persistence
-and change listener, the message logger (record/filter/persist/cap), the grid
-model and the results table model. All checks must pass before building a
-release jar.
+and change listener, the message logger (record/filter/persist/cap/notes), the
+action-button click routing, the organizer dedupe state, the inspector model,
+the grid model and the results table model. All checks must pass before
+building a release jar.
 
 ## Roadmap
 

@@ -1,14 +1,14 @@
 package scopehighlighter.log;
 
 /**
- * The four Burp places the user wants to reveal requests from, plus ALL.
+ * The sources the "show all" window can reveal requests from, plus ALL.
  */
 public enum Source {
     ALL("show all"),
     REPEATER("repeater"),
     INTRUDER("intruder"),
-    HISTORY("history"),
-    TARGET("target");
+    TARGET("target"),
+    HISTORY("proxy history");
 
     private final String buttonLabel;
 
@@ -20,15 +20,19 @@ public enum Source {
         return buttonLabel;
     }
 
-    /** Label used in the record's Source column ("Repeater", "Intruder", ...). */
+    /** Label used in the record's Source column ("Repeater", "History", ...). */
     public String recordLabel() {
         switch (this) {
-            case ALL:
-                return "All";
             case HISTORY:
                 return "History";
+            case TARGET:
+                return "Target";
+            case REPEATER:
+                return "Repeater";
+            case INTRUDER:
+                return "Intruder";
             default:
-                return buttonLabel.substring(0, 1).toUpperCase() + buttonLabel.substring(1);
+                return "All";
         }
     }
 }

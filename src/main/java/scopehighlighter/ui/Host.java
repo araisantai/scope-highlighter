@@ -25,4 +25,22 @@ public interface Host {
 
     /** Re-apply highlights to existing Burp history after group changes. */
     void reapplyHighlights();
+
+    /** Context menu / actions: send a request for this endpoint to Repeater. */
+    void sendToRepeater(String endpointOrUrl);
+
+    /** Context menu / actions: send a request for this endpoint to Intruder. */
+    void sendToIntruder(String endpointOrUrl);
+
+    /**
+     * "notes to organizer": send all recorded requests matching the matcher
+     * to Burp's Organizer, noted with the group title (deduplicated).
+     */
+    int syncToOrganizer(ScopeGroup matcher);
+
+    /** Copy plain text to the system clipboard. */
+    void copyToClipboard(String text);
+
+    /** Create a request/response viewer (Burp editors when available). */
+    MessageViewer createMessageViewer();
 }

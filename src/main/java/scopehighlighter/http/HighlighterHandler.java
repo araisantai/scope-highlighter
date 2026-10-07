@@ -11,6 +11,7 @@ import burp.api.montoya.http.handler.ResponseReceivedAction;
 import scopehighlighter.log.MessageLog;
 import scopehighlighter.log.MessageRecord;
 import scopehighlighter.model.GroupStore;
+import scopehighlighter.model.ScopeGroup;
 
 import java.util.Optional;
 
@@ -18,19 +19,29 @@ import java.util.Optional;
  * 1) Auto-highlights every request that flows through Burp (Proxy, Repeater,
  *    Scanner, ...) according to the matching scope group.
  * 2) Records every completed exchange into the {@link MessageLog} with its
- *    tool of origin, so Repeater/Intruder requests can be replayed from the
- *    Scope Highlighter tab later (Burp keeps no history API for those tools).
+ *    tool of origin and its notes (group title), so Repeater/Intruder requests
+ *    can be replayed from the Scope Highlighter tab later (Burp keeps no
+ *    history API for those tools).
+ * 3) Notifies a {@link Listener} for every recorded match (used for the
+ *    automatic "notes to organizer" sync).
  */
 public final class HighlighterHandler implements HttpHandler {
+
+    /** Called after a message was recorded; match is null when no group matched. */
+    public interface Listener {
+        void onRecorded(MessageRecord record, ScopeGroup match);
+    }
 
     private final MontoyaApi api;
     private final GroupStore store;
     private final MessageLog messageLog;
+    private final Listener listener;
 
-    public HighlighterHandler(MontoyaApi api, GroupStore store, MessageLog messageLog) {
+    public HighlighterHandler(MontoyaApi api, GroupStore store, MessageLog messageLog, Listener listener) {
         this.api = api;
         this.store = store;
         this.messageLog = messageLog;
+        this.listener = listener;
     }
 
     @Override
@@ -53,12 +64,17 @@ public final class HighlighterHandler implements HttpHandler {
 
     @Override
     public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived responseReceived) {
-        record(responseReceived);
+        Optional<GroupStore.Match> match = Optional.empty();
+        try {
+            match = store.findMatch(responseReceived.initiatingRequest().url());
+        } catch (Exception e) {
+            log("Scope Highlighter: match error: " + e);
+        }
+        record(responseReceived, match.map(GroupStore.Match::group).orElse(null));
         try {
             if (!store.isAutoHighlightEnabled()) {
                 return ResponseReceivedAction.continueWith(responseReceived);
             }
-            Optional<GroupStore.Match> match = store.findMatch(responseReceived.initiatingRequest().url());
             if (match.isEmpty()) {
                 return ResponseReceivedAction.continueWith(responseReceived);
             }
@@ -70,11 +86,14 @@ public final class HighlighterHandler implements HttpHandler {
         }
     }
 
-    private void record(HttpResponseReceived responseReceived) {
+    private void record(HttpResponseReceived responseReceived, ScopeGroup match) {
         try {
             String source = sourceLabel(responseReceived.toolSource().toolType());
             String requestRaw = MessageLog.clampRaw(responseReceived.initiatingRequest().toString());
             String responseRaw = MessageLog.clampRaw(responseReceived.toString());
+            String notes = match != null
+                    ? match.name()
+                    : (responseReceived.annotations().hasNotes() ? responseReceived.annotations().notes() : "");
             MessageRecord record = new MessageRecord(
                     System.currentTimeMillis(),
                     source,
@@ -84,8 +103,12 @@ public final class HighlighterHandler implements HttpHandler {
                     requestRaw.length(),
                     responseRaw.length(),
                     requestRaw,
-                    responseRaw);
+                    responseRaw,
+                    notes);
             messageLog.record(record);
+            if (listener != null) {
+                listener.onRecorded(record, match);
+            }
         } catch (Exception e) {
             log("Scope Highlighter: record error: " + e);
         }

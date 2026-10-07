@@ -26,6 +26,7 @@ public final class GroupStore {
     private static final String KEY_AUTO = "scopehighlighter.auto_highlight";
     private static final String KEY_NOTES = "scopehighlighter.write_notes";
     private static final String KEY_NAMES = "scopehighlighter.known_names";
+    private static final String KEY_ORGANIZER = "scopehighlighter.auto_organizer";
 
     public static final class Match {
         private final ScopeGroup group;
@@ -49,6 +50,7 @@ public final class GroupStore {
     private final Set<String> knownNames = new LinkedHashSet<>();
     private volatile boolean autoHighlight = true;
     private volatile boolean writeNotes = true;
+    private volatile boolean autoOrganizer = true;
     private PersistedObject persistedData;
     private Runnable changeListener;
 
@@ -91,6 +93,10 @@ public final class GroupStore {
         if (notes != null) {
             writeNotes = notes;
         }
+        Boolean organizer = data.getBoolean(KEY_ORGANIZER);
+        if (organizer != null) {
+            autoOrganizer = organizer;
+        }
         String names = data.getString(KEY_NAMES);
         if (names != null && !names.isEmpty()) {
             for (String name : names.split("\n")) {
@@ -106,6 +112,7 @@ public final class GroupStore {
             persistedData.setString(KEY_GROUPS, saveToString());
             persistedData.setBoolean(KEY_AUTO, autoHighlight);
             persistedData.setBoolean(KEY_NOTES, writeNotes);
+            persistedData.setBoolean(KEY_ORGANIZER, autoOrganizer);
             persistedData.setString(KEY_NAMES, String.join("\n", knownNames));
         }
     }
@@ -276,6 +283,15 @@ public final class GroupStore {
 
     public synchronized void setWriteNotesEnabled(boolean enabled) {
         writeNotes = enabled;
+        fireChanged();
+    }
+
+    public boolean isAutoOrganizerEnabled() {
+        return autoOrganizer;
+    }
+
+    public synchronized void setAutoOrganizerEnabled(boolean enabled) {
+        autoOrganizer = enabled;
         fireChanged();
     }
 }

@@ -33,6 +33,9 @@ public final class SelfTest {
         precedenceTests();
         storeListenerTests();
         messageLogTests();
+        actionRoutingTests();
+        organizerSyncTests();
+        detailModelTests();
         tabSmokeTest();
         resultsModelTests();
 
@@ -222,18 +225,28 @@ public final class SelfTest {
         String req = "GET /x?a=1|2\ttab HTTP/1.1\nHost: \u00e9\u00e8\n\nbody|with\ttabs";
         String resp = "HTTP/1.1 200 OK\n\n\u4f60\u597d|world\nline2";
         nasty.record(new MessageRecord(1, "Intruder", "GET", "https://a.com/x?a=1|2", 200,
-                req.length(), resp.length(), req, resp));
+                req.length(), resp.length(), req, resp, "Hiring|Stage"));
         MessageLog nastyBack = new MessageLog();
         nastyBack.loadFromBlob(nasty.toBlob());
         check("log: blob survives nasty characters", nastyBack.size() == 1
                 && nastyBack.entries().get(0).requestRaw().equals(req)
                 && nastyBack.entries().get(0).responseRaw().equals(resp)
-                && nastyBack.entries().get(0).url().equals("https://a.com/x?a=1|2"));
+                && nastyBack.entries().get(0).url().equals("https://a.com/x?a=1|2")
+                && nastyBack.entries().get(0).notes().equals("Hiring|Stage"));
 
         // corrupt blob content is skipped, never throws
         MessageLog corrupt = new MessageLog();
         corrupt.loadFromBlob("v2\nnot-base64\t\t\n\n###\tx\ty\n");
         check("log: corrupt blob tolerated", corrupt.size() == 0);
+
+        // notes (group title) survive persistence
+        MessageLog noted = new MessageLog();
+        noted.record(new MessageRecord(5, "Repeater", "GET", "https://a.com/n", 200,
+                1, 1, "r", "s", "Hiring Stage"));
+        MessageLog notedBack = new MessageLog();
+        notedBack.loadFromBlob(noted.toBlob());
+        check("log: notes survive persistence",
+                notedBack.size() == 1 && "Hiring Stage".equals(notedBack.entries().get(0).notes()));
 
         // truncation marker
         String huge = "x".repeat(MessageLog.MAX_RAW_CHARS + 100);
@@ -248,6 +261,73 @@ public final class SelfTest {
         }
         check("log: FIFO cap holds", big.size() == MessageLog.MAX_ENTRIES);
         check("log: FIFO drops oldest", big.entries().get(0).url().equals("https://a.com/10"));
+    }
+
+    private static void actionRoutingTests() {
+        // three equal buttons per cell: border 2px + 3px gaps between
+        for (int width : new int[]{200, 333, 360, 500}) {
+            int count = ScopeHighlighterTab.ACTIONS.length;
+            int gap = 3;
+            int inset = 2;
+            int buttonWidth = (width - 2 * inset - (count - 1) * gap) / count;
+            boolean all = true;
+            for (int i = 0; i < count; i++) {
+                int center = inset + i * (buttonWidth + gap) + buttonWidth / 2;
+                if (ScopeHighlighterTab.actionIndexForCellX(center, width) != i) {
+                    all = false;
+                }
+            }
+            check("actions: all three buttons routable at width " + width, all);
+        }
+        check("actions: first button left edge", ScopeHighlighterTab.actionIndexForCellX(2, 360) == 0);
+        check("actions: last button right edge", ScopeHighlighterTab.actionIndexForCellX(357, 360) == 2);
+        check("actions: gap maps to nearest button", ScopeHighlighterTab.actionIndexForCellX(120, 360) == 1);
+    }
+
+    private static void organizerSyncTests() {
+        scopehighlighter.organizer.OrganizerSync sync = new scopehighlighter.organizer.OrganizerSync();
+        check("organizer: first send goes through", sync.markSent("GET /a 200 1/2"));
+        check("organizer: duplicate suppressed", !sync.markSent("GET /a 200 1/2"));
+        check("organizer: second key goes through", sync.markSent("GET /b 200 1/2"));
+        check("organizer: tracks size", sync.size() == 2);
+
+        scopehighlighter.organizer.OrganizerSync restored = new scopehighlighter.organizer.OrganizerSync();
+        restored.loadFromBlob(sync.toBlob());
+        check("organizer: dedupe state survives restore",
+                !restored.markSent("GET /a 200 1/2") && restored.size() == 2);
+    }
+
+    private static void detailModelTests() {
+        MessageRecord record = new MessageRecord(1725000000000L, "Repeater", "POST",
+                "https://a.com/x?id=7&name=bob", 200, 50, 60,
+                "POST /x?id=7 HTTP/1.1\r\nHost: a.com\r\nX-Test: 1\r\n\r\nbody",
+                "HTTP/1.1 200 OK\r\n\r\nok", "Hiring Stage");
+        ResultsFrame.DetailTableModel model = new ResultsFrame.DetailTableModel();
+        model.setRecord(record);
+
+        boolean headerFound = false;
+        boolean paramFound = false;
+        boolean methodFound = false;
+        for (int i = 0; i < model.getRowCount(); i++) {
+            String name = String.valueOf(model.getValueAt(i, 0));
+            String value = String.valueOf(model.getValueAt(i, 1));
+            if ("X-Test".equals(name) && "1".equals(value)) {
+                headerFound = true;
+            }
+            if ("param id".equals(name) && "7".equals(value)) {
+                paramFound = true;
+            }
+            if ("Method".equals(name) && "POST".equals(value)) {
+                methodFound = true;
+            }
+        }
+        check("details: summary fields shown", methodFound);
+        check("details: request headers parsed", headerFound);
+        check("details: query params parsed", paramFound);
+        check("details: notes available", "Hiring Stage".equals(record.notes()));
+
+        model.setRecord(null);
+        check("details: cleared with null record", model.getRowCount() == 0);
     }
 
     private static void tabSmokeTest() {
@@ -319,6 +399,28 @@ public final class SelfTest {
 
         @Override
         public void reapplyHighlights() {
+        }
+
+        @Override
+        public void sendToRepeater(String endpointOrUrl) {
+        }
+
+        @Override
+        public void sendToIntruder(String endpointOrUrl) {
+        }
+
+        @Override
+        public int syncToOrganizer(ScopeGroup matcher) {
+            return 0;
+        }
+
+        @Override
+        public void copyToClipboard(String text) {
+        }
+
+        @Override
+        public scopehighlighter.ui.MessageViewer createMessageViewer() {
+            return scopehighlighter.ui.BurpMessageViewer.textOnly();
         }
     }
 

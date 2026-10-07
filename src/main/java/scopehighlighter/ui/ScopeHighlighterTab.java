@@ -8,8 +8,10 @@ import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JLabel;
+import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.ListSelectionModel;
@@ -34,18 +36,34 @@ import java.util.List;
  *
  * Excel-like grid: one bold group row per group ("Hiring Stage - 3 endpoints")
  * and below it one row per endpoint, columns: #, Endpoint / Group, Color,
- * Match, Action. The Action column shows the five "show" buttons
- * (show all / repeater / intruder / history / target) which open the results
- * viewer for that row's endpoint (or the whole group on a group row).
+ * Match, Action. The Action column has three buttons:
+ *   copy endpoint | show all | notes to organizer
  *
- * All changes apply automatically: adding/editing/removing a group re-applies
- * highlights to existing traffic via {@link Host#reapplyHighlights()}.
+ * Left-click behaviour:
+ *   group row    -> just selects (double-click edits the group)
+ *   endpoint row -> opens a Burp-style context menu (Send to Repeater /
+ *                   Intruder / Organizer, Copy endpoint, Show all)
  */
 public final class ScopeHighlighterTab extends JPanel {
 
-    /** Button order in the Action column. */
-    static final Source[] ACTION_SOURCES = {
-            Source.ALL, Source.REPEATER, Source.INTRUDER, Source.HISTORY, Source.TARGET};
+    /** The three Action-column buttons. */
+    public enum RowAction {
+        COPY("copy endpoint"),
+        SHOW_ALL("show all"),
+        TO_ORGANIZER("notes to organizer");
+
+        private final String label;
+
+        RowAction(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
+
+    public static final RowAction[] ACTIONS = RowAction.values();
 
     private final GroupStore store;
     private final Host host;
@@ -96,8 +114,13 @@ public final class ScopeHighlighterTab extends JPanel {
 
         JCheckBox autoHighlight = new JCheckBox("Auto-highlight new traffic", store.isAutoHighlightEnabled());
         JCheckBox writeNotes = new JCheckBox("Write group name to Notes", store.isWriteNotesEnabled());
+        JCheckBox autoOrganizer = new JCheckBox("Auto-add to Organizer", store.isAutoOrganizerEnabled());
         autoHighlight.setToolTipText("Every request flowing through Burp gets highlighted automatically");
         writeNotes.setToolTipText("Also write the group title into the Notes column (only when the note is empty)");
+        autoOrganizer.setToolTipText(
+                "<html>Every request matching a group is automatically sent to Burp's Organizer,<br>"
+                        + "noted with the group title and highlighted in the group color.<br>"
+                        + "The Montoya API cannot create Organizer collections - use the note to group them.</html>");
 
         add.addActionListener(e -> onAdd());
         edit.addActionListener(e -> onEdit());
@@ -112,6 +135,10 @@ public final class ScopeHighlighterTab extends JPanel {
             store.setWriteNotesEnabled(writeNotes.isSelected());
             refreshAll();
         });
+        autoOrganizer.addActionListener(e -> {
+            store.setAutoOrganizerEnabled(autoOrganizer.isSelected());
+            refreshAll();
+        });
 
         toolbar.add(add);
         toolbar.add(edit);
@@ -121,6 +148,7 @@ public final class ScopeHighlighterTab extends JPanel {
         toolbar.add(new JLabel("   "));
         toolbar.add(autoHighlight);
         toolbar.add(writeNotes);
+        toolbar.add(autoOrganizer);
         return toolbar;
     }
 
@@ -137,7 +165,7 @@ public final class ScopeHighlighterTab extends JPanel {
         table.getColumnModel().getColumn(1).setPreferredWidth(520);
         table.getColumnModel().getColumn(2).setPreferredWidth(110);
         table.getColumnModel().getColumn(3).setPreferredWidth(90);
-        table.getColumnModel().getColumn(4).setPreferredWidth(340);
+        table.getColumnModel().getColumn(4).setPreferredWidth(360);
 
         table.getColumnModel().getColumn(1).setCellRenderer(new TextCellRenderer());
         table.getColumnModel().getColumn(2).setCellRenderer(new ColorCellRenderer());
@@ -145,7 +173,7 @@ public final class ScopeHighlighterTab extends JPanel {
 
         table.addMouseListener(new MouseAdapter() {
             @Override
-            public void mousePressed(MouseEvent e) {
+            public void mouseClicked(MouseEvent e) {
                 int viewRow = table.rowAtPoint(e.getPoint());
                 int viewCol = table.columnAtPoint(e.getPoint());
                 if (viewRow < 0) {
@@ -153,8 +181,17 @@ public final class ScopeHighlighterTab extends JPanel {
                 }
                 if (viewCol == 4) {
                     onActionButton(viewRow, e.getX());
-                } else if (e.getClickCount() == 2) {
+                    return;
+                }
+                if (e.getClickCount() == 2) {
                     onEdit();
+                } else if (e.getClickCount() == 1) {
+                    OutlineRow row = model.rowAt(table.convertRowIndexToModel(viewRow));
+                    // group rows behave as before (just select); endpoint rows
+                    // open the Burp-style context menu
+                    if (row != null && !row.isGroupRow()) {
+                        showContextMenu(row, e);
+                    }
                 }
             }
         });
@@ -162,46 +199,124 @@ public final class ScopeHighlighterTab extends JPanel {
     }
 
     /**
-     * The Action column renders 5 equal-width buttons; hit-test which one was
-     * clicked by splitting the cell into 5 equal zones.
+     * The Action column renders 3 equal-width buttons; each button's exact
+     * pixel range is recomputed here so the click routes to the right action.
      */
     private void onActionButton(int viewRow, int clickX) {
         Rectangle cell = table.getCellRect(viewRow, 4, false);
         if (cell == null || cell.width <= 0) {
             return;
         }
-        int zone = (int) (((long) (clickX - cell.x)) * ACTION_SOURCES.length / cell.width);
-        if (zone < 0) {
-            zone = 0;
-        }
-        if (zone >= ACTION_SOURCES.length) {
-            zone = ACTION_SOURCES.length - 1;
-        }
+        int actionIndex = actionIndexForCellX(clickX - cell.x, cell.width);
         OutlineRow row = model.rowAt(table.convertRowIndexToModel(viewRow));
         if (row == null) {
             return;
         }
-        openResults(row, ACTION_SOURCES[zone]);
+        switch (ACTIONS[actionIndex]) {
+            case COPY:
+                onCopyEndpoint(row);
+                break;
+            case SHOW_ALL:
+                openResults(row, Source.ALL);
+                break;
+            case TO_ORGANIZER:
+                onNotesToOrganizer(row);
+                break;
+            default:
+                break;
+        }
     }
 
-    private void openResults(OutlineRow row, Source source) {
-        ScopeGroup matcher;
-        String title;
-        if (row.isGroupRow()) {
-            matcher = new ScopeGroup(row.group.name(), row.group.color(), row.group.mode(),
-                    true, row.group.patterns());
-            title = row.group.name();
-        } else {
-            matcher = new ScopeGroup(row.group.name(), row.group.color(), row.group.mode(),
-                    true, List.of(row.endpoint));
-            title = row.endpoint;
+    /**
+     * Mirrors the renderer's GridLayout geometry (border 2px left/right,
+     * 3px gaps, equal widths) so clicks map to buttons exactly.
+     */
+    public static int actionIndexForCellX(int x, int cellWidth) {
+        int count = ACTIONS.length;
+        int gap = 3;
+        int inset = 2;
+        int buttonWidth = (cellWidth - 2 * inset - (count - 1) * gap) / count;
+        if (buttonWidth <= 0) {
+            return 0;
         }
-        ResultsFrame frame = new ResultsFrame(title, matcher, host);
-        frame.setVisible(true);
+        int best = 0;
+        int bestDistance = Integer.MAX_VALUE;
+        for (int i = 0; i < count; i++) {
+            int x0 = inset + i * (buttonWidth + gap);
+            int x1 = x0 + buttonWidth;
+            if (x >= x0 && x < x1) {
+                return i;
+            }
+            int distance = x < x0 ? x0 - x : x - x1;
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = i;
+            }
+        }
+        return best;
     }
 
     // ------------------------------------------------------------------
-    // actions
+    // row actions
+    // ------------------------------------------------------------------
+
+    private ScopeGroup matcherFor(OutlineRow row) {
+        if (row.isGroupRow()) {
+            return new ScopeGroup(row.group.name(), row.group.color(), row.group.mode(),
+                    true, row.group.patterns());
+        }
+        return new ScopeGroup(row.group.name(), row.group.color(), row.group.mode(),
+                true, List.of(row.endpoint));
+    }
+
+    private void openResults(OutlineRow row, Source source) {
+        ResultsFrame frame = new ResultsFrame(row.isGroupRow() ? row.group.name() : row.endpoint,
+                matcherFor(row), host);
+        frame.setVisible(true);
+    }
+
+    private void onCopyEndpoint(OutlineRow row) {
+        String text = row.isGroupRow()
+                ? String.join("\n", row.group.patterns())
+                : row.endpoint;
+        host.copyToClipboard(text);
+        statusLabel.setText(" copied to clipboard: " + text.replace('\n', ' '));
+    }
+
+    private void onNotesToOrganizer(OutlineRow row) {
+        statusLabel.setText(" sending to Organizer\u2026");
+        int sent = host.syncToOrganizer(matcherFor(row));
+        statusLabel.setText(" " + sent + " request(s) sent to Organizer, noted with \""
+                + row.group.name() + "\"");
+        host.log("Scope Highlighter: organizer sync for \"" + row.group.name() + "\": " + sent + " sent");
+    }
+
+    private void showContextMenu(OutlineRow row, MouseEvent e) {
+        JPopupMenu menu = new JPopupMenu();
+
+        JMenuItem repeater = new JMenuItem("Send to Repeater");
+        repeater.addActionListener(ev -> host.sendToRepeater(row.endpoint));
+        JMenuItem intruder = new JMenuItem("Send to Intruder");
+        intruder.addActionListener(ev -> host.sendToIntruder(row.endpoint));
+        JMenuItem organizer = new JMenuItem("Send to Organizer");
+        organizer.addActionListener(ev -> onNotesToOrganizer(row));
+        JMenuItem copy = new JMenuItem("Copy endpoint");
+        copy.addActionListener(ev -> onCopyEndpoint(row));
+        JMenuItem showAll = new JMenuItem("Show all");
+        showAll.addActionListener(ev -> openResults(row, Source.ALL));
+
+        menu.add(repeater);
+        menu.add(intruder);
+        menu.add(organizer);
+        menu.addSeparator();
+        menu.add(copy);
+        menu.addSeparator();
+        menu.add(showAll);
+        menu.show(e.getComponent(), e.getX(), e.getY());
+    }
+
+    // ------------------------------------------------------------------
+    // group management
     // ------------------------------------------------------------------
 
     private OutlineRow selectedRow() {
@@ -304,8 +419,9 @@ public final class ScopeHighlighterTab extends JPanel {
 
     private void refreshStatus() {
         String state = store.isAutoHighlightEnabled() ? "auto-highlight ON" : "auto-highlight OFF";
+        String organizer = store.isAutoOrganizerEnabled() ? "organizer ON" : "organizer OFF";
         statusLabel.setText(" " + store.groupCount() + " group(s), "
-                + store.endpointCount() + " endpoint(s) \u2014 " + state
+                + store.endpointCount() + " endpoint(s) \u2014 " + state + ", " + organizer
                 + " \u2014 every change is applied automatically"
                 + " \u2014 top group wins when several match");
     }
@@ -466,8 +582,9 @@ public final class ScopeHighlighterTab extends JPanel {
     }
 
     /**
-     * The Action column: 5 equal-width buttons. Renderer (non-interactive);
-     * clicks are routed by {@link ScopeHighlighterTab#onActionButton}.
+     * The Action column: 3 equal-width buttons (copy endpoint / show all /
+     * notes to organizer). Renderer (non-interactive); clicks are routed by
+     * {@link ScopeHighlighterTab#onActionButton} using the same geometry.
      */
     static final class ActionCellRenderer extends DefaultTableCellRenderer {
         private final JPanel panel = actionPanel();
@@ -480,10 +597,10 @@ public final class ScopeHighlighterTab extends JPanel {
     }
 
     static JPanel actionPanel() {
-        JPanel panel = new JPanel(new GridLayout(1, ACTION_SOURCES.length, 3, 0));
+        JPanel panel = new JPanel(new GridLayout(1, ACTIONS.length, 3, 0));
         panel.setBorder(BorderFactory.createEmptyBorder(1, 2, 1, 2));
-        for (Source source : ACTION_SOURCES) {
-            JButton button = new JButton(source.buttonLabel());
+        for (RowAction action : ACTIONS) {
+            JButton button = new JButton(action.label());
             button.setMargin(new Insets(1, 2, 1, 2));
             button.setFocusable(false);
             button.setFont(button.getFont().deriveFont(10f));
