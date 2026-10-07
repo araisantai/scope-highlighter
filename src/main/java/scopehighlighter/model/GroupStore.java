@@ -6,8 +6,10 @@ import burp.api.montoya.persistence.PersistedObject;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Holds all scope groups plus the extension settings, survives Burp restarts
@@ -23,6 +25,7 @@ public final class GroupStore {
     private static final String KEY_GROUPS = "scopehighlighter.state.v1";
     private static final String KEY_AUTO = "scopehighlighter.auto_highlight";
     private static final String KEY_NOTES = "scopehighlighter.write_notes";
+    private static final String KEY_NAMES = "scopehighlighter.known_names";
 
     public static final class Match {
         private final ScopeGroup group;
@@ -43,9 +46,32 @@ public final class GroupStore {
     }
 
     private final List<ScopeGroup> groups = new ArrayList<>();
+    private final Set<String> knownNames = new LinkedHashSet<>();
     private volatile boolean autoHighlight = true;
     private volatile boolean writeNotes = true;
     private PersistedObject persistedData;
+    private Runnable changeListener;
+
+    /**
+     * Fired after every change to groups/settings. The extension uses this to
+     * re-apply highlights to existing traffic automatically (no manual button).
+     */
+    public synchronized void setChangeListener(Runnable listener) {
+        this.changeListener = listener;
+    }
+
+    public synchronized void fireChanged() {
+        save();
+        Runnable listener = changeListener;
+        if (listener != null) {
+            listener.run();
+        }
+    }
+
+    /** True when this note was written by us (a group title, past or present). */
+    public synchronized boolean isKnownName(String name) {
+        return name != null && knownNames.contains(name);
+    }
 
     // ------------------------------------------------------------------
     // persistence
@@ -65,6 +91,14 @@ public final class GroupStore {
         if (notes != null) {
             writeNotes = notes;
         }
+        String names = data.getString(KEY_NAMES);
+        if (names != null && !names.isEmpty()) {
+            for (String name : names.split("\n")) {
+                if (!name.isEmpty()) {
+                    knownNames.add(name);
+                }
+            }
+        }
     }
 
     private void save() {
@@ -72,6 +106,7 @@ public final class GroupStore {
             persistedData.setString(KEY_GROUPS, saveToString());
             persistedData.setBoolean(KEY_AUTO, autoHighlight);
             persistedData.setBoolean(KEY_NOTES, writeNotes);
+            persistedData.setString(KEY_NAMES, String.join("\n", knownNames));
         }
     }
 
@@ -114,6 +149,9 @@ public final class GroupStore {
                     }
                 }
                 groups.add(new ScopeGroup(name, color, mode, enabled, patterns));
+                if (!name.isEmpty()) {
+                    knownNames.add(name);
+                }
             } else if (line.startsWith("s|")) {
                 String[] parts = line.split("\\|", -1);
                 if (parts.length > 1) {
@@ -177,20 +215,22 @@ public final class GroupStore {
 
     public synchronized void addGroup(ScopeGroup group) {
         groups.add(group);
-        save();
+        knownNames.add(group.name());
+        fireChanged();
     }
 
     public synchronized void updateGroup(int index, ScopeGroup group) {
         if (index >= 0 && index < groups.size()) {
             groups.set(index, group);
-            save();
+            knownNames.add(group.name());
+            fireChanged();
         }
     }
 
     public synchronized void removeGroup(int index) {
         if (index >= 0 && index < groups.size()) {
             groups.remove(index);
-            save();
+            fireChanged();
         }
     }
 
@@ -201,7 +241,7 @@ public final class GroupStore {
         }
         ScopeGroup group = groups.remove(index);
         groups.add(target, group);
-        save();
+        fireChanged();
     }
 
     /**
@@ -227,7 +267,7 @@ public final class GroupStore {
 
     public synchronized void setAutoHighlightEnabled(boolean enabled) {
         autoHighlight = enabled;
-        save();
+        fireChanged();
     }
 
     public boolean isWriteNotesEnabled() {
@@ -236,6 +276,6 @@ public final class GroupStore {
 
     public synchronized void setWriteNotesEnabled(boolean enabled) {
         writeNotes = enabled;
-        save();
+        fireChanged();
     }
 }

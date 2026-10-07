@@ -2,27 +2,35 @@ package scopehighlighter.http;
 
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.Annotations;
+import burp.api.montoya.core.ToolType;
 import burp.api.montoya.http.handler.HttpHandler;
 import burp.api.montoya.http.handler.HttpRequestToBeSent;
 import burp.api.montoya.http.handler.HttpResponseReceived;
 import burp.api.montoya.http.handler.RequestToBeSentAction;
 import burp.api.montoya.http.handler.ResponseReceivedAction;
+import scopehighlighter.log.MessageLog;
+import scopehighlighter.log.MessageRecord;
 import scopehighlighter.model.GroupStore;
 
 import java.util.Optional;
 
 /**
- * Auto-highlights every request that flows through Burp (Proxy, Repeater,
- * Scanner, ...) according to the matching scope group.
+ * 1) Auto-highlights every request that flows through Burp (Proxy, Repeater,
+ *    Scanner, ...) according to the matching scope group.
+ * 2) Records every completed exchange into the {@link MessageLog} with its
+ *    tool of origin, so Repeater/Intruder requests can be replayed from the
+ *    Scope Highlighter tab later (Burp keeps no history API for those tools).
  */
 public final class HighlighterHandler implements HttpHandler {
 
     private final MontoyaApi api;
     private final GroupStore store;
+    private final MessageLog messageLog;
 
-    public HighlighterHandler(MontoyaApi api, GroupStore store) {
+    public HighlighterHandler(MontoyaApi api, GroupStore store, MessageLog messageLog) {
         this.api = api;
         this.store = store;
+        this.messageLog = messageLog;
     }
 
     @Override
@@ -45,6 +53,7 @@ public final class HighlighterHandler implements HttpHandler {
 
     @Override
     public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived responseReceived) {
+        record(responseReceived);
         try {
             if (!store.isAutoHighlightEnabled()) {
                 return ResponseReceivedAction.continueWith(responseReceived);
@@ -58,6 +67,48 @@ public final class HighlighterHandler implements HttpHandler {
         } catch (Exception e) {
             log("Scope Highlighter: response handler error: " + e);
             return ResponseReceivedAction.continueWith(responseReceived);
+        }
+    }
+
+    private void record(HttpResponseReceived responseReceived) {
+        try {
+            String source = sourceLabel(responseReceived.toolSource().toolType());
+            String requestRaw = MessageLog.clampRaw(responseReceived.initiatingRequest().toString());
+            String responseRaw = MessageLog.clampRaw(responseReceived.toString());
+            MessageRecord record = new MessageRecord(
+                    System.currentTimeMillis(),
+                    source,
+                    responseReceived.initiatingRequest().method(),
+                    responseReceived.initiatingRequest().url(),
+                    responseReceived.statusCode(),
+                    requestRaw.length(),
+                    responseRaw.length(),
+                    requestRaw,
+                    responseRaw);
+            messageLog.record(record);
+        } catch (Exception e) {
+            log("Scope Highlighter: record error: " + e);
+        }
+    }
+
+    /** User vocabulary: Proxy traffic = "History". */
+    private static String sourceLabel(ToolType toolType) {
+        if (toolType == null) {
+            return "Other";
+        }
+        switch (toolType) {
+            case PROXY:
+                return "History";
+            case REPEATER:
+                return "Repeater";
+            case INTRUDER:
+                return "Intruder";
+            case SCANNER:
+                return "Scanner";
+            case TARGET:
+                return "Target";
+            default:
+                return toolType.toolName();
         }
     }
 

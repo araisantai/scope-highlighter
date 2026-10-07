@@ -259,6 +259,15 @@ public final class GroupDialog extends JDialog {
         }
     }
 
+    /** Light tint of a Burp color, used as row background in results tables. */
+    public static Color lightTint(HighlightColor color) {
+        Color base = swatchFor(color);
+        return new Color(
+                (base.getRed() + 255 * 3) / 4,
+                (base.getGreen() + 255 * 3) / 4,
+                (base.getBlue() + 255 * 3) / 4);
+    }
+
     static final class ColorSwatchRenderer extends javax.swing.DefaultListCellRenderer {
         @Override
         public Component getListCellRendererComponent(javax.swing.JList<?> list, Object value, int index,

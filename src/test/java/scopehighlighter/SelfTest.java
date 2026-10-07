@@ -1,20 +1,25 @@
 package scopehighlighter;
 
+import burp.api.montoya.core.HighlightColor;
+import scopehighlighter.log.MessageLog;
+import scopehighlighter.log.MessageRecord;
 import scopehighlighter.model.GroupStore;
 import scopehighlighter.model.MatchMode;
 import scopehighlighter.model.ScopeGroup;
+import scopehighlighter.ui.GroupDialog;
+import scopehighlighter.ui.ResultsFrame;
 import scopehighlighter.ui.ScopeHighlighterTab;
 import scopehighlighter.util.EndpointParser;
-import burp.api.montoya.core.HighlightColor;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 
 /**
- * Headless self-test: exercises the Excel paste parser, the URL matcher,
- * store serialization round-trip, match precedence and the tab UI model.
- * Run via ./test.sh
+ * Headless self-test: Excel paste parser, URL matcher, store persistence and
+ * change listener, message logger (record/filter/persist/cap), outline grid
+ * model and results table model. Run via ./test.sh
  */
 public final class SelfTest {
 
@@ -26,7 +31,10 @@ public final class SelfTest {
         matcherTests();
         storeRoundTripTests();
         precedenceTests();
+        storeListenerTests();
+        messageLogTests();
         tabSmokeTest();
+        resultsModelTests();
 
         System.out.println();
         System.out.println("RESULT: " + passed + " passed, " + failed + " failed");
@@ -139,6 +147,8 @@ public final class SelfTest {
         check("store: settings round-trip",
                 !restored.isAutoHighlightEnabled() && !restored.isWriteNotesEnabled());
         check("store: endpoint count", restored.endpointCount() == 3);
+        check("store: known names survive restore",
+                restored.isKnownName("admin career page") && restored.isKnownName("admin verification location"));
 
         restored.setAutoHighlightEnabled(true);
         restored.setWriteNotesEnabled(true);
@@ -165,35 +175,132 @@ public final class SelfTest {
                 match.isPresent() && match.get().group().name().equals("second"));
     }
 
+    private static void storeListenerTests() {
+        GroupStore store = new GroupStore();
+        int[] fired = {0};
+        store.setChangeListener(() -> fired[0]++);
+
+        store.addGroup(new ScopeGroup("hiring stage", HighlightColor.RED, MatchMode.PREFIX, true,
+                List.of("https://example.com/hiring-detail")));
+        check("listener: fires on add", fired[0] == 1);
+        check("listener: add registers known name", store.isKnownName("hiring stage"));
+
+        store.updateGroup(0, new ScopeGroup("hiring stage v2", HighlightColor.BLUE, MatchMode.PREFIX, true,
+                List.of("https://example.com/hiring-detail")));
+        check("listener: fires on update", fired[0] == 2);
+
+        store.removeGroup(0);
+        check("listener: fires on remove", fired[0] == 3);
+        check("listener: removed group name stays known (for highlight cleanup)",
+                store.isKnownName("hiring stage") && store.isKnownName("hiring stage v2"));
+    }
+
+    private static void messageLogTests() {
+        MessageLog log = new MessageLog();
+        log.record(new MessageRecord(1000, "Repeater", "GET", "https://a.com/one", 200, 10, 20, "REQ1", "RESP1"));
+        log.record(new MessageRecord(2000, "Intruder", "POST", "https://a.com/two", 404, 11, 21, "REQ2", "RESP2"));
+        log.record(new MessageRecord(3000, "History", "GET", "https://a.com/three", 200, 12, 22, "REQ3", "RESP3"));
+
+        check("log: records 3", log.size() == 3);
+        check("log: chronological", log.entries().get(0).url().equals("https://a.com/one"));
+        check("log: filter by source", log.filter(r -> r.isFrom("Repeater")).size() == 1
+                && log.filter(r -> r.isFrom("Intruder")).size() == 1);
+        check("log: raw kept", log.entries().get(1).requestRaw().equals("REQ2")
+                && log.entries().get(1).responseRaw().equals("RESP2"));
+
+        // persistence round trip
+        List<List<String>> saved = log.saveToStrings();
+        MessageLog restored = new MessageLog();
+        restored.loadFromStrings(saved.get(0), saved.get(1), saved.get(2));
+        check("log: persist round trip", restored.size() == 3);
+        check("log: persist keeps details", restored.entries().get(1).url().equals("https://a.com/two")
+                && restored.entries().get(1).status() == 404
+                && restored.entries().get(1).requestRaw().equals("REQ2"));
+
+        // truncation marker
+        String huge = "x".repeat(MessageLog.MAX_RAW_CHARS + 100);
+        String clamped = MessageLog.clampRaw(huge);
+        check("log: oversized raw clamped", clamped.length() < huge.length()
+                && clamped.endsWith("...[truncated by Scope Highlighter]"));
+
+        // FIFO cap
+        MessageLog big = new MessageLog();
+        for (int i = 0; i < MessageLog.MAX_ENTRIES + 10; i++) {
+            big.record(new MessageRecord(i, "Intruder", "GET", "https://a.com/" + i, 200, 1, 1, "r", "s"));
+        }
+        check("log: FIFO cap holds", big.size() == MessageLog.MAX_ENTRIES);
+        check("log: FIFO drops oldest", big.entries().get(0).url().equals("https://a.com/10"));
+    }
+
     private static void tabSmokeTest() {
         try {
             System.setProperty("java.awt.headless", "true");
             GroupStore store = new GroupStore();
             store.addGroup(new ScopeGroup("admin career page", HighlightColor.RED, MatchMode.PREFIX, true,
-                    List.of("https://admin.site.com/career")));
+                    List.of("https://admin.site.com/career", "/admin/verify-location")));
 
-            ScopeHighlighterTab tab = new ScopeHighlighterTab(store, new ScopeHighlighterTab.Host() {
-                @Override
-                public java.awt.Component applyTheme(java.awt.Component component) {
-                    return component;
-                }
-
-                @Override
-                public void log(String message) {
-                }
-
-                @Override
-                public void highlightHistory(Runnable onFinished) {
-                    onFinished.run();
-                }
-            });
+            ScopeHighlighterTab tab = new ScopeHighlighterTab(store, new HostStub());
 
             check("ui: tab constructs headless", tab != null && tab.getComponentCount() == 3);
             javax.swing.JTable table = findTable(tab);
-            check("ui: table has one group row", table != null && table.getRowCount() == 1);
-            check("ui: table shows title", "admin career page".equals(table.getValueAt(0, 1)));
+            check("ui: grid has group + endpoint rows", table != null && table.getRowCount() == 3);
+            check("ui: grid has action column", table != null && table.getColumnCount() == 5);
+            check("ui: group row title+count", "admin career page  (2 endpoints)".equals(table.getValueAt(0, 1)));
+            check("ui: endpoint rows listed like excel",
+                    "https://admin.site.com/career".equals(table.getValueAt(1, 1))
+                    && "/admin/verify-location".equals(table.getValueAt(2, 1)));
+            check("ui: endpoint numbering", "1".equals(table.getValueAt(1, 0))
+                    && "2".equals(table.getValueAt(2, 0)));
+            check("ui: color and match columns", "Red".equals(table.getValueAt(0, 2))
+                    && "Prefix".equals(table.getValueAt(0, 3)));
+
+            // mutation through the store refreshes the grid
+            store.addGroup(new ScopeGroup("candidate detail", HighlightColor.BLUE, MatchMode.CONTAINS, true,
+                    List.of("https://example.com/candidate-detail")));
+            tab.refreshAll();
+            check("ui: grid reflects new group", table.getRowCount() == 5);
         } catch (Throwable t) {
             check("ui: tab smoke test (" + t + ")", false);
+        }
+    }
+
+    private static void resultsModelTests() {
+        List<MessageRecord> records = new ArrayList<>();
+        records.add(new MessageRecord(0, "Target", "GET", "https://a.com/x", 200, 5, 10, "REQ", "RESP"));
+        records.add(new MessageRecord(1725000000000L, "Repeater", "POST", "https://a.com/y", 500, 6, 11, "REQ2", "RESP2"));
+
+        ResultsFrame.ResultsTableModel model =
+                new ResultsFrame.ResultsTableModel(records, GroupDialog.lightTint(HighlightColor.RED));
+        check("results: row count", model.getRowCount() == 2);
+        check("results: columns", model.getColumnCount() == 7);
+        check("results: numbering and source", Integer.valueOf(1).equals(model.getValueAt(0, 0))
+                && "Target".equals(model.getValueAt(0, 2)));
+        check("results: zero timestamp shows dash", "-".equals(model.getValueAt(0, 1)));
+        check("results: url/status/length", "https://a.com/y".equals(model.getValueAt(1, 4))
+                && Integer.valueOf(500).equals(model.getValueAt(1, 5))
+                && Integer.valueOf(11).equals(model.getValueAt(1, 6)));
+        check("results: tint set", model.tint() != null);
+    }
+
+    // ------------------------------------------------------------------
+
+    private static final class HostStub implements scopehighlighter.ui.Host {
+        @Override
+        public java.awt.Component applyTheme(java.awt.Component component) {
+            return component;
+        }
+
+        @Override
+        public void log(String message) {
+        }
+
+        @Override
+        public List<MessageRecord> collect(scopehighlighter.log.Source source, ScopeGroup matcher) {
+            return new ArrayList<>();
+        }
+
+        @Override
+        public void reapplyHighlights() {
         }
     }
 
@@ -211,8 +318,6 @@ public final class SelfTest {
         }
         return null;
     }
-
-    // ------------------------------------------------------------------
 
     private static void check(String label, boolean ok) {
         if (ok) {
