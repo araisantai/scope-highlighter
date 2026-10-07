@@ -48,10 +48,18 @@ public final class ScopeHighlighterExtension implements BurpExtension {
         api.extension().setName(TAB_NAME);
 
         store = new GroupStore();
-        store.attach(api.persistence().extensionData());
+        try {
+            store.attach(api.persistence().extensionData());
+        } catch (Exception e) {
+            api.logging().logToError("Scope Highlighter: failed to load groups: " + e);
+        }
 
         messageLog = new MessageLog();
-        messageLog.attach(api.persistence().extensionData());
+        try {
+            messageLog.attach(api.persistence().extensionData());
+        } catch (Exception e) {
+            api.logging().logToError("Scope Highlighter: failed to load request log: " + e);
+        }
         if (messageLog.size() == 0) {
             seedFromProxyHistory();
         }

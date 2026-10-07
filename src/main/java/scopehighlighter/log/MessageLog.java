@@ -1,9 +1,10 @@
 package scopehighlighter.log;
 
-import burp.api.montoya.persistence.PersistedList;
 import burp.api.montoya.persistence.PersistedObject;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.function.Predicate;
 
@@ -14,9 +15,14 @@ import java.util.function.Predicate;
  * so this log is what makes those requests recoverable - and it is persisted
  * into the Burp project file, so it survives save/reload and restarts.
  *
- * Persistence: three parallel string lists (meta / request / response) so no
- * serialization of message objects is needed. Flushes are throttled (every
- * {@link #FLUSH_EVERY} records + on extension unload) to keep traffic fast.
+ * Persistence: ONE plain string blob ("v2", one base64 triple per line).
+ * NOTE: PersistedList&lt;String&gt; is deliberately NOT used - Burp returns
+ * internal wrapper objects instead of Strings when reading a persisted
+ * string list back (ClassCastException), so plain setString/getString is
+ * the only reliable channel.
+ *
+ * Flushes are throttled (every {@link #FLUSH_EVERY} records + on extension
+ * unload) to keep traffic handling fast.
  */
 public final class MessageLog {
 
@@ -24,9 +30,9 @@ public final class MessageLog {
     public static final int FLUSH_EVERY = 50;
     public static final int MAX_RAW_CHARS = 200_000;
 
-    private static final String KEY_META = "scopehighlighter.log.meta";
-    private static final String KEY_REQ = "scopehighlighter.log.req";
-    private static final String KEY_RESP = "scopehighlighter.log.resp";
+    private static final String KEY_LOG = "scopehighlighter.log.v2";
+    private static final String[] LEGACY_LIST_KEYS = {
+            "scopehighlighter.log.meta", "scopehighlighter.log.req", "scopehighlighter.log.resp"};
 
     private final List<MessageRecord> records = new ArrayList<>();
     private PersistedObject persistedData;
@@ -38,38 +44,66 @@ public final class MessageLog {
 
     public synchronized void attach(PersistedObject data) {
         this.persistedData = data;
-        List<String> meta = toStringList(data.getStringList(KEY_META));
-        List<String> req = toStringList(data.getStringList(KEY_REQ));
-        List<String> resp = toStringList(data.getStringList(KEY_RESP));
-        loadFromStrings(meta, req, resp);
+        deleteLegacyLists();
+        String blob = data.getString(KEY_LOG);
+        if (blob != null && !blob.isEmpty()) {
+            loadFromBlob(blob);
+        }
+    }
+
+    /**
+     * Removes the v1 persisted string lists: their elements come back as
+     * Burp-internal wrapper objects and cannot be read as Strings.
+     */
+    private void deleteLegacyLists() {
+        for (String key : LEGACY_LIST_KEYS) {
+            try {
+                persistedData.deleteStringList(key);
+            } catch (Exception ignored) {
+                // key may not exist / older Burp builds may differ - harmless
+            }
+        }
     }
 
     public synchronized void saveNow() {
         if (persistedData == null) {
             return;
         }
-        PersistedList<String> meta = PersistedList.persistedStringList();
-        PersistedList<String> req = PersistedList.persistedStringList();
-        PersistedList<String> resp = PersistedList.persistedStringList();
-        synchronized (this) {
-            for (MessageRecord record : records) {
-                meta.add(record.toMetaLine());
-                req.add(record.requestRaw());
-                resp.add(record.responseRaw());
-            }
-        }
-        persistedData.setStringList(KEY_META, meta);
-        persistedData.setStringList(KEY_REQ, req);
-        persistedData.setStringList(KEY_RESP, resp);
+        persistedData.setString(KEY_LOG, toBlob());
         sinceFlush = 0;
     }
 
-    /** Round-trip format used for persistence and tests. */
-    public synchronized void loadFromStrings(List<String> meta, List<String> requestRaw, List<String> responseRaw) {
+    /**
+     * Blob format:
+     *   v2
+     *   &lt;b64 meta&gt;\t&lt;b64 request&gt;\t&lt;b64 response&gt;   (one line per record)
+     * with meta = ts|source|status|reqLen|respLen|method|url.
+     */
+    public synchronized String toBlob() {
+        StringBuilder sb = new StringBuilder("v2\n");
+        for (MessageRecord record : records) {
+            sb.append(b64(record.toMetaLine())).append('\t')
+                    .append(b64(record.requestRaw())).append('\t')
+                    .append(b64(record.responseRaw())).append('\n');
+        }
+        return sb.toString();
+    }
+
+    public synchronized void loadFromBlob(String blob) {
         records.clear();
-        int count = Math.min(meta.size(), Math.min(requestRaw.size(), responseRaw.size()));
-        for (int i = 0; i < count; i++) {
-            MessageRecord record = MessageRecord.fromMetaLine(meta.get(i), requestRaw.get(i), responseRaw.get(i));
+        if (blob == null || blob.isEmpty()) {
+            return;
+        }
+        for (String line : blob.split("\n")) {
+            if (line.isEmpty() || line.equals("v2") || line.startsWith("v1")) {
+                continue;
+            }
+            String[] parts = line.split("\t", 3);
+            if (parts.length < 3) {
+                continue;
+            }
+            MessageRecord record = MessageRecord.fromMetaLine(
+                    unb64(parts[0]), unb64(parts[1]), unb64(parts[2]));
             if (record != null) {
                 records.add(record);
             }
@@ -77,20 +111,17 @@ public final class MessageLog {
         trim();
     }
 
-    public synchronized List<List<String>> saveToStrings() {
-        List<String> meta = new ArrayList<>();
-        List<String> req = new ArrayList<>();
-        List<String> resp = new ArrayList<>();
-        for (MessageRecord record : records) {
-            meta.add(record.toMetaLine());
-            req.add(record.requestRaw());
-            resp.add(record.responseRaw());
+    private static String b64(String value) {
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String unb64(String value) {
+        try {
+            return new String(Base64.getUrlDecoder().decode(value), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "";
         }
-        List<List<String>> out = new ArrayList<>();
-        out.add(meta);
-        out.add(req);
-        out.add(resp);
-        return out;
     }
 
     // ------------------------------------------------------------------
@@ -140,13 +171,5 @@ public final class MessageLog {
             return raw;
         }
         return raw.substring(0, MAX_RAW_CHARS) + "\n...[truncated by Scope Highlighter]";
-    }
-
-    private static List<String> toStringList(PersistedList<String> persisted) {
-        List<String> out = new ArrayList<>();
-        if (persisted != null) {
-            out.addAll(persisted);
-        }
-        return out;
     }
 }

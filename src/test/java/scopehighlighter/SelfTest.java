@@ -208,14 +208,32 @@ public final class SelfTest {
         check("log: raw kept", log.entries().get(1).requestRaw().equals("REQ2")
                 && log.entries().get(1).responseRaw().equals("RESP2"));
 
-        // persistence round trip
-        List<List<String>> saved = log.saveToStrings();
+        // persistence round trip (blob format)
+        String blob = log.toBlob();
         MessageLog restored = new MessageLog();
-        restored.loadFromStrings(saved.get(0), saved.get(1), saved.get(2));
+        restored.loadFromBlob(blob);
         check("log: persist round trip", restored.size() == 3);
         check("log: persist keeps details", restored.entries().get(1).url().equals("https://a.com/two")
                 && restored.entries().get(1).status() == 404
                 && restored.entries().get(1).requestRaw().equals("REQ2"));
+
+        // nasty characters survive the blob (tabs, newlines, unicode, pipes)
+        MessageLog nasty = new MessageLog();
+        String req = "GET /x?a=1|2\ttab HTTP/1.1\nHost: \u00e9\u00e8\n\nbody|with\ttabs";
+        String resp = "HTTP/1.1 200 OK\n\n\u4f60\u597d|world\nline2";
+        nasty.record(new MessageRecord(1, "Intruder", "GET", "https://a.com/x?a=1|2", 200,
+                req.length(), resp.length(), req, resp));
+        MessageLog nastyBack = new MessageLog();
+        nastyBack.loadFromBlob(nasty.toBlob());
+        check("log: blob survives nasty characters", nastyBack.size() == 1
+                && nastyBack.entries().get(0).requestRaw().equals(req)
+                && nastyBack.entries().get(0).responseRaw().equals(resp)
+                && nastyBack.entries().get(0).url().equals("https://a.com/x?a=1|2"));
+
+        // corrupt blob content is skipped, never throws
+        MessageLog corrupt = new MessageLog();
+        corrupt.loadFromBlob("v2\nnot-base64\t\t\n\n###\tx\ty\n");
+        check("log: corrupt blob tolerated", corrupt.size() == 0);
 
         // truncation marker
         String huge = "x".repeat(MessageLog.MAX_RAW_CHARS + 100);

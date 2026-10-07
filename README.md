@@ -116,7 +116,7 @@ Prefix matching is case-insensitive and segment-aware: `/admin/career` matches
 
 ```
 build.sh                                  build the jar (downloads Montoya API if needed)
-test.sh                                   headless self-test (59 checks)
+test.sh                                   headless self-test (61 checks)
 src/main/java/scopehighlighter/
   ScopeHighlighterExtension.java          entry point, collect/auto-highlight wiring
   http/HighlighterHandler.java            auto-highlight + request recording on live traffic
