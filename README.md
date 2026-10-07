@@ -20,12 +20,16 @@ Excel and want a fast visual split in Burp — e.g. "Hiring Stage" in red,
 2. **"Scope Highlighter" tab** — an Excel-like grid:
 
    ```
-   | #  | Endpoint / Group                    | Color | Match  | Action                                     |
-   | G1 | Hiring Stage  (2 endpoints)         | Red   | Prefix | [copy endpoint][show all][notes to organizer]|
-   | 1  |     https://example.com/hiring-...  | Red   | Prefix | [copy endpoint][show all][notes to organizer]|
-   | 2  |     /hiring-detail/admin            | Red   | Prefix | [copy endpoint][show all][notes to organizer]|
-   | G2 | Candidate Detail  (1 endpoint)      | Blue  | Regex  | [copy endpoint][show all][notes to organizer]|
+   | #  | Endpoint / Group            | Color | Match  | Sources                | Action                                        |
+   | G1 | Hiring Stage  (2 endpoints) | Red   | Prefix | Repeater, History      | [copy endpoint][show all][notes to organizer]  |
+   | 1  |   https://example.com/hi..  | Red   | Prefix | Repeater, Target       | [copy endpoint][show all][notes to organizer]  |
+   | 2  |   /hiring-detail/admin      | Red   | Prefix | History                | [copy endpoint][show all][notes to organizer]  |
    ```
+
+   The **Sources** column shows which Burp places hold data for each row
+   (Repeater / Intruder / History / Target), refreshed automatically.
+   Action buttons are colorized (copy = slate, show all = green, notes to
+   organizer = orange) with hover and pressed feedback.
 
    Add groups with title, color (Burp's 9 highlight colors), match mode and
    the endpoint list pasted straight from Excel. Groups are stored in the Burp
@@ -41,21 +45,26 @@ Excel and want a fast visual split in Burp — e.g. "Hiring Stage" in red,
    - **notes to organizer** — sends every recorded request of that row to
      Burp's Organizer, noted with the group title and highlighted in the group
      color (duplicates are never sent twice).
-5. **Left-click behaviour**
-   - group row: just selects (double-click edits the group)
-   - endpoint row: opens a Burp-style context menu — **Send to Repeater**,
-     **Send to Intruder**, **Send to Organizer**, **Copy endpoint**,
-     **Show all**. (Sends use the most recent recorded request of that
-     endpoint, so method/body are preserved.)
-6. **"show all" reveal window** — every recorded request of the endpoint:
+5. **Left-click behaviour (Burp-style)**
+   - left-click endpoint row: the standard options menu (Send to Repeater,
+     Send to Intruder, Send to Comparer, Send to Organizer, Copy endpoint,
+     Show all) — right-click works too
+   - double-click endpoint row: **Show All** (never opens the group editor)
+   - (double-)click group row: opens the scope-group editor
+6. **"show all" reveal window** — every related request of the endpoint,
+   combining ALL available sources:
    - source chooser: **show all / repeater / intruder / target / proxy history**
+     (proxy history and target are read live from Burp, so nothing is missed
+     even for requests made before the extension loaded)
    - messages rendered in **Burp's own message editors** (Pretty / Raw / Hex),
      like Burp's search history — with the search term highlighted
    - **Inspector-style details pane** (method, URL, status, query parameters,
      request headers) and the **Notes** of the message
    - **live refresh**: every upcoming request of that endpoint appears
      automatically while the window is open (Repeater + Intruder included)
-   - rows tinted with the group color, per-source counts, live text filter
+   - rows tinted with the group color, per-source counts, live text filter,
+     and a diagnostic hint when a source has requests that don't match the
+     endpoint pattern (shows sample URLs so the pattern can be fixed)
 7. **Request logger, saved with the project** — every request is recorded with
    its tool of origin and persisted into the Burp project file, so Repeater and
    Intruder requests survive save/reload — Burp itself keeps no history API for
@@ -137,7 +146,7 @@ Prefix matching is case-insensitive and segment-aware: `/admin/career` matches
 
 ```
 build.sh                                  build the jar (downloads Montoya API if needed)
-test.sh                                   headless self-test (79 checks)
+test.sh                                   headless self-test (82 checks)
 src/main/java/scopehighlighter/
   ScopeHighlighterExtension.java          entry point, host bridge, organizer sync
   http/HighlighterHandler.java            auto-highlight + request recording on live traffic

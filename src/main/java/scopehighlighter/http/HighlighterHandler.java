@@ -67,10 +67,14 @@ public final class HighlighterHandler implements HttpHandler {
         Optional<GroupStore.Match> match = Optional.empty();
         try {
             match = store.findMatch(responseReceived.initiatingRequest().url());
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log("Scope Highlighter: match error: " + e);
         }
-        record(responseReceived, match.map(GroupStore.Match::group).orElse(null));
+        try {
+            record(responseReceived, match.map(GroupStore.Match::group).orElse(null));
+        } catch (Throwable e) {
+            log("Scope Highlighter: record dispatch error: " + e);
+        }
         try {
             if (!store.isAutoHighlightEnabled()) {
                 return ResponseReceivedAction.continueWith(responseReceived);
@@ -109,7 +113,7 @@ public final class HighlighterHandler implements HttpHandler {
             if (listener != null) {
                 listener.onRecorded(record, match);
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             log("Scope Highlighter: record error: " + e);
         }
     }

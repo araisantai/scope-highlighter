@@ -32,6 +32,9 @@ public interface Host {
     /** Context menu / actions: send a request for this endpoint to Intruder. */
     void sendToIntruder(String endpointOrUrl);
 
+    /** Context menu / actions: send a request for this endpoint to Comparer. */
+    void sendToComparer(String endpointOrUrl);
+
     /**
      * "notes to organizer": send all recorded requests matching the matcher
      * to Burp's Organizer, noted with the group title (deduplicated).
@@ -43,4 +46,14 @@ public interface Host {
 
     /** Create a request/response viewer (Burp editors when available). */
     MessageViewer createMessageViewer();
+
+    /** Diagnostics: e.g. "logger: 1234 recorded (repeater 900, intruder 12, history 322)". */
+    String loggerSummary();
+
+    /**
+     * Every record the extension can see: logger + live proxy history +
+     * live site map, deduplicated. Used for the per-row Sources column and
+     * the "show all" diagnostics.
+     */
+    List<MessageRecord> allKnownRecords();
 }

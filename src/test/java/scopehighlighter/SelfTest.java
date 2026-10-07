@@ -36,6 +36,7 @@ public final class SelfTest {
         actionRoutingTests();
         organizerSyncTests();
         detailModelTests();
+        sourcesColumnTests();
         tabSmokeTest();
         resultsModelTests();
 
@@ -330,6 +331,29 @@ public final class SelfTest {
         check("details: cleared with null record", model.getRowCount() == 0);
     }
 
+    private static void sourcesColumnTests() {
+        List<MessageRecord> records = new ArrayList<>();
+        records.add(new MessageRecord(1, "Repeater", "GET", "https://a.com/x", 200, 1, 1, "r", "s"));
+        records.add(new MessageRecord(2, "Intruder", "GET", "https://a.com/x?id=1", 200, 1, 1, "r", "s"));
+        records.add(new MessageRecord(3, "Target", "GET", "https://a.com/x/other", 200, 1, 1, "r", "s"));
+        records.add(new MessageRecord(4, "History", "GET", "https://a.com/unrelated", 200, 1, 1, "r", "s"));
+
+        ScopeGroup matcher = new ScopeGroup("g", HighlightColor.RED, MatchMode.PREFIX, true,
+                List.of("https://a.com/x"));
+        check("sources: canonical order (repeater, intruder, target)",
+                ScopeHighlighterTab.describeSources(matcher, records).equals("Repeater, Intruder, Target"));
+
+        ScopeGroup broad = new ScopeGroup("g", HighlightColor.RED, MatchMode.PREFIX, true,
+                List.of("https://a.com"));
+        check("sources: all four in order",
+                ScopeHighlighterTab.describeSources(broad, records).equals("Repeater, Intruder, History, Target"));
+
+        ScopeGroup none = new ScopeGroup("g", HighlightColor.RED, MatchMode.PREFIX, true,
+                List.of("https://nomatch/"));
+        check("sources: dash when nothing matches",
+                ScopeHighlighterTab.describeSources(none, records).equals("\u2014"));
+    }
+
     private static void tabSmokeTest() {
         try {
             System.setProperty("java.awt.headless", "true");
@@ -342,7 +366,7 @@ public final class SelfTest {
             check("ui: tab constructs headless", tab != null && tab.getComponentCount() == 3);
             javax.swing.JTable table = findTable(tab);
             check("ui: grid has group + endpoint rows", table != null && table.getRowCount() == 3);
-            check("ui: grid has action column", table != null && table.getColumnCount() == 5);
+            check("ui: grid has action column", table != null && table.getColumnCount() == 6);
             check("ui: group row title+count", "admin career page  (2 endpoints)".equals(table.getValueAt(0, 1)));
             check("ui: endpoint rows listed like excel",
                     "https://admin.site.com/career".equals(table.getValueAt(1, 1))
@@ -410,6 +434,15 @@ public final class SelfTest {
         }
 
         @Override
+        public void sendToComparer(String endpointOrUrl) {
+        }
+
+        @Override
+        public List<MessageRecord> allKnownRecords() {
+            return new ArrayList<>();
+        }
+
+        @Override
         public int syncToOrganizer(ScopeGroup matcher) {
             return 0;
         }
@@ -421,6 +454,11 @@ public final class SelfTest {
         @Override
         public scopehighlighter.ui.MessageViewer createMessageViewer() {
             return scopehighlighter.ui.BurpMessageViewer.textOnly();
+        }
+
+        @Override
+        public String loggerSummary() {
+            return "logger: 0 recorded";
         }
     }
 

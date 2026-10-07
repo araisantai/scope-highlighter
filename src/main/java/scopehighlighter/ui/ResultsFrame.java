@@ -256,8 +256,30 @@ public final class ResultsFrame extends JFrame {
         } else if (visible.isEmpty()) {
             detailModel.setRecord(null);
             notesArea.setText("");
-            summaryLabel.setText(summaryLabel.getText()
-                    + "  \u2014  nothing recorded yet for this source");
+            String label = currentSource == Source.ALL ? null : currentSource.recordLabel();
+            int nonMatching = 0;
+            List<String> examples = new ArrayList<>();
+            for (MessageRecord record : host.allKnownRecords()) {
+                if (label == null || record.isFrom(label)) {
+                    if (matcher.match(record.url()).isEmpty()) {
+                        nonMatching++;
+                        if (examples.size() < 2) {
+                            examples.add(record.method() + " " + record.url());
+                        }
+                    }
+                }
+            }
+            StringBuilder msg = new StringBuilder(summaryLabel.getText())
+                    .append("  \u2014  no \"").append(currentSource.buttonLabel())
+                    .append("\" request matches this endpoint");
+            if (nonMatching > 0) {
+                msg.append(" (").append(nonMatching).append(" exist but don't match \u2014 e.g. ")
+                        .append(String.join(" | ", examples))
+                        .append(" \u2014 check the pattern/match mode)");
+            } else {
+                msg.append(" (nothing recorded in this source yet \u2014 recording starts when the extension loads)");
+            }
+            summaryLabel.setText(msg.toString());
         }
     }
 

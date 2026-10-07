@@ -46,6 +46,7 @@ import java.util.Set;
 public final class ScopeHighlighterExtension implements BurpExtension {
 
     public static final String TAB_NAME = "Scope Highlighter";
+    public static final String VERSION = "v6";
 
     private MontoyaApi api;
     private GroupStore store;
@@ -97,6 +98,17 @@ public final class ScopeHighlighterExtension implements BurpExtension {
             });
             api.userInterface().registerSuiteTab(TAB_NAME, tab);
         });
+
+        api.logging().logToOutput("Scope Highlighter " + VERSION + " loaded \u2014 " + logSummary());
+    }
+
+    /** One-line logger diagnostics (shown in the tab status and at startup). */
+    private String logSummary() {
+        int repeater = messageLog.filter(r -> r.isFrom("Repeater")).size();
+        int intruder = messageLog.filter(r -> r.isFrom("Intruder")).size();
+        int history = messageLog.filter(r -> r.isFrom("History")).size();
+        return "logger: " + messageLog.size() + " recorded (repeater " + repeater
+                + ", intruder " + intruder + ", history " + history + ")";
     }
 
     // ------------------------------------------------------------------
@@ -160,35 +172,58 @@ public final class ScopeHighlighterExtension implements BurpExtension {
         @Override
         public List<MessageRecord> collect(Source source, ScopeGroup matcher) {
             List<MessageRecord> out = new ArrayList<>();
-            if (source == Source.ALL) {
-                Set<String> keys = new HashSet<>();
-                for (MessageRecord record : messageLog.entries()) {
+            Set<String> keys = new HashSet<>();
+            if (source == Source.ALL || source == Source.HISTORY) {
+                // live proxy history is authoritative and includes entries the
+                // logger never saw (loaded before the extension, or evicted)
+                for (MessageRecord record : proxyHistoryRecords()) {
                     keys.add(record.key());
                     if (matcher.match(record.url()).isPresent()) {
                         out.add(record);
                     }
                 }
+            }
+            if (source == Source.TARGET || source == Source.ALL) {
                 for (MessageRecord record : siteMapRecords()) {
                     if (!keys.contains(record.key()) && matcher.match(record.url()).isPresent()) {
                         out.add(record);
                     }
                 }
-            } else if (source == Source.TARGET) {
-                for (MessageRecord record : siteMapRecords()) {
-                    if (matcher.match(record.url()).isPresent()) {
-                        out.add(record);
-                    }
-                }
-            } else {
-                String label = source.recordLabel();
+            }
+            if (source != Source.TARGET) {
+                String label = source == Source.ALL ? null : source.recordLabel();
                 for (MessageRecord record : messageLog.entries()) {
-                    if (record.isFrom(label) && matcher.match(record.url()).isPresent()) {
+                    if (!keys.contains(record.key())
+                            && (label == null || record.isFrom(label))
+                            && matcher.match(record.url()).isPresent()) {
                         out.add(record);
                     }
                 }
             }
             out.sort(Comparator.comparingLong(MessageRecord::timestamp));
             return out;
+        }
+
+        @Override
+        public String loggerSummary() {
+            List<MessageRecord> all = messageLog.entries();
+            int repeater = 0;
+            int intruder = 0;
+            int history = 0;
+            int other = 0;
+            for (MessageRecord record : all) {
+                if (record.isFrom("Repeater")) {
+                    repeater++;
+                } else if (record.isFrom("Intruder")) {
+                    intruder++;
+                } else if (record.isFrom("History")) {
+                    history++;
+                } else {
+                    other++;
+                }
+            }
+            return "logger: " + all.size() + " recorded (repeater " + repeater
+                    + ", intruder " + intruder + ", history " + history + ", other " + other + ")";
         }
 
         @Override
@@ -218,6 +253,40 @@ public final class ScopeHighlighterExtension implements BurpExtension {
                 log("Scope Highlighter: no request available yet for " + endpointOrUrl
                         + " (browse the endpoint once, then try again)");
             }
+        }
+
+        @Override
+        public void sendToComparer(String endpointOrUrl) {
+            HttpRequest request = buildRequest(endpointOrUrl);
+            if (request != null) {
+                api.comparer().sendToComparer(burp.api.montoya.core.ByteArray.byteArray(request.toString()));
+                log("Scope Highlighter: sent " + endpointOrUrl + " to Comparer");
+            } else {
+                log("Scope Highlighter: no request available yet for " + endpointOrUrl
+                        + " (browse the endpoint once, then try again)");
+            }
+        }
+
+        @Override
+        public List<MessageRecord> allKnownRecords() {
+            Set<String> keys = new HashSet<>();
+            List<MessageRecord> out = new ArrayList<>();
+            for (MessageRecord record : messageLog.entries()) {
+                keys.add(record.key());
+                out.add(record);
+            }
+            for (MessageRecord record : proxyHistoryRecords()) {
+                if (keys.add(record.key())) {
+                    out.add(record);
+                }
+            }
+            for (MessageRecord record : siteMapRecords()) {
+                if (keys.add(record.key())) {
+                    out.add(record);
+                }
+            }
+            out.sort(Comparator.comparingLong(MessageRecord::timestamp));
+            return out;
         }
 
         @Override
@@ -305,6 +374,35 @@ public final class ScopeHighlighterExtension implements BurpExtension {
             }
         } catch (Exception e) {
             api.logging().logToError("Scope Highlighter: site map read failed: " + e);
+        }
+        return out;
+    }
+
+    /** Burp's Proxy history, queried live (labelled "History"). */
+    private List<MessageRecord> proxyHistoryRecords() {
+        List<MessageRecord> out = new ArrayList<>();
+        try {
+            for (ProxyHttpRequestResponse entry : api.proxy().history()) {
+                try {
+                    String requestRaw = MessageLog.clampRaw(entry.request().toString());
+                    String responseRaw = "";
+                    int status = 0;
+                    if (entry.hasResponse() && entry.response() != null) {
+                        responseRaw = MessageLog.clampRaw(entry.response().toString());
+                        status = entry.response().statusCode();
+                    }
+                    long timestamp = entry.time() == null ? 0 : entry.time().toInstant().toEpochMilli();
+                    String notes = entry.annotations() != null && entry.annotations().hasNotes()
+                            ? entry.annotations().notes() : "";
+                    out.add(new MessageRecord(timestamp, "History",
+                            entry.finalRequest().method(), entry.finalRequest().url(), status,
+                            requestRaw.length(), responseRaw.length(), requestRaw, responseRaw, notes));
+                } catch (Exception ignored) {
+                    // skip unreadable entries
+                }
+            }
+        } catch (Exception e) {
+            api.logging().logToError("Scope Highlighter: proxy history read failed: " + e);
         }
         return out;
     }
