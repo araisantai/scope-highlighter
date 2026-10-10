@@ -53,52 +53,19 @@ import java.util.List;
  */
 public final class ScopeHighlighterTab extends JPanel {
 
-    /** The two Action-column buttons. */
+    /** The two Action-column buttons (plain, no color). */
     public enum RowAction {
-        // Burp's default orange
-        SHOW_ALL("Show Requests", new Color(0xFF, 0x66, 0x33), new Color(0xFF, 0x7A, 0x50), true),
-        // no color: plain button look
-        TO_ORGANIZER("Notes Organizer", new Color(0xED, 0xED, 0xED), new Color(0xF6, 0xF6, 0xF6), false);
+        SHOW_ALL("Show Requests"),
+        TO_ORGANIZER("Push Organizer Notes");
 
         private final String label;
-        private final Color base;
-        private final Color hover;
-        private final boolean colored;
 
-        RowAction(String label, Color base, Color hover, boolean colored) {
+        RowAction(String label) {
             this.label = label;
-            this.base = base;
-            this.hover = hover;
-            this.colored = colored;
         }
 
         public String label() {
             return label;
-        }
-
-        public Color base() {
-            return base;
-        }
-
-        public Color hover() {
-            return hover;
-        }
-
-        public Color pressed() {
-            return base.darker();
-        }
-
-        /** Colored buttons get white text; the plain one gets dark text. */
-        public boolean colored() {
-            return colored;
-        }
-
-        public Color textColor() {
-            return colored ? Color.WHITE : new Color(0x3C, 0x3C, 0x3C);
-        }
-
-        public Color borderColor() {
-            return colored ? new Color(255, 255, 255, 70) : new Color(0xC2, 0xC2, 0xC2);
         }
     }
 
@@ -496,6 +463,18 @@ public final class ScopeHighlighterTab extends JPanel {
             return pressedIndex;
         }
 
+        // plain "square rounded" button style (no color)
+        private static final int RADIUS = 4;
+        private static final Color BASE_TOP = new Color(0xF7, 0xF7, 0xF7);
+        private static final Color BASE_BOTTOM = new Color(0xE8, 0xE8, 0xE8);
+        private static final Color HOVER_TOP = new Color(0xFF, 0xFF, 0xFF);
+        private static final Color HOVER_BOTTOM = new Color(0xEF, 0xEF, 0xEF);
+        private static final Color PRESSED_TOP = new Color(0xD8, 0xD8, 0xD8);
+        private static final Color PRESSED_BOTTOM = new Color(0xE2, 0xE2, 0xE2);
+        private static final Color BORDER = new Color(0xC4, 0xC4, 0xC4);
+        private static final Color BORDER_HOVER = new Color(0x9E, 0x9E, 0x9E);
+        private static final Color TEXT = new Color(0x3C, 0x3C, 0x3C);
+
         @Override
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
@@ -508,7 +487,7 @@ public final class ScopeHighlighterTab extends JPanel {
             int gap = 3;
             int inset = 2;
             int buttonWidth = (width - 2 * inset - (count - 1) * gap) / count;
-            Font font = getFont().deriveFont(Font.BOLD, 10f);
+            Font font = getFont().deriveFont(Font.PLAIN, 11f);
             g2.setFont(font);
             for (int i = 0; i < count; i++) {
                 int x = inset + i * (buttonWidth + gap);
@@ -516,17 +495,20 @@ public final class ScopeHighlighterTab extends JPanel {
                 int h = height - 2;
                 boolean pressed = i == pressedIndex;
                 boolean hover = i == hoverIndex && !pressed;
-                Color top = pressed ? ACTIONS[i].pressed() : hover ? ACTIONS[i].hover() : ACTIONS[i].base();
-                Color bottom = pressed ? ACTIONS[i].base() : ACTIONS[i].base().darker();
+
+                Color top = pressed ? PRESSED_TOP : hover ? HOVER_TOP : BASE_TOP;
+                Color bottom = pressed ? PRESSED_BOTTOM : hover ? HOVER_BOTTOM : BASE_BOTTOM;
                 g2.setPaint(new GradientPaint(x, y, top, x, y + h, bottom));
-                g2.fillRoundRect(x, y + (pressed ? 1 : 0), buttonWidth, h - (pressed ? 1 : 0), 8, 8);
-                g2.setColor(ACTIONS[i].borderColor());
-                g2.drawRoundRect(x, y + (pressed ? 1 : 0), buttonWidth, h - (pressed ? 1 : 0), 8, 8);
+                g2.fillRoundRect(x, y + (pressed ? 1 : 0), buttonWidth, h - (pressed ? 1 : 0), RADIUS, RADIUS);
+
+                g2.setColor(hover || pressed ? BORDER_HOVER : BORDER);
+                g2.drawRoundRect(x, y + (pressed ? 1 : 0), buttonWidth, h - (pressed ? 1 : 0), RADIUS, RADIUS);
+
                 String text = ACTIONS[i].label();
                 int textWidth = g2.getFontMetrics().stringWidth(text);
                 int textX = x + Math.max(2, (buttonWidth - textWidth) / 2);
                 int textY = y + (h + g2.getFontMetrics().getAscent() - g2.getFontMetrics().getDescent()) / 2 + (pressed ? 1 : 0);
-                g2.setColor(ACTIONS[i].textColor());
+                g2.setColor(TEXT);
                 g2.drawString(text, textX, textY);
             }
             g2.dispose();
