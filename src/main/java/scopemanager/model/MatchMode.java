@@ -1,4 +1,4 @@
-package scopehighlighter.model;
+package scopemanager.model;
 
 /**
  * How a group's endpoint patterns are matched against a request URL.

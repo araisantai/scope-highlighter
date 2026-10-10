@@ -1,12 +1,15 @@
-package scopehighlighter.model;
+package scopemanager.model;
 
 import burp.api.montoya.core.HighlightColor;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -15,11 +18,23 @@ import java.util.regex.Pattern;
  */
 public final class ScopeGroup {
 
+    private static final Pattern PLACEHOLDER = Pattern.compile(
+            "\\{\\{[A-Za-z_][A-Za-z0-9_]*\\}\\}|\\{[A-Za-z_][A-Za-z0-9_]*\\}");
+
     private String name;
     private HighlightColor color;
     private MatchMode mode;
     private boolean enabled;
     private final List<String> patterns = new ArrayList<>();
+    private final Map<String, TemplatePatterns> templates = new HashMap<>();
+
+    private record TemplatePatterns(Pattern full, Pattern withoutQuery) {
+        boolean matches(String candidate) {
+            Pattern selected = candidate.indexOf('?') < 0 && withoutQuery != null
+                    ? withoutQuery : full;
+            return selected.matcher(candidate).find();
+        }
+    }
 
     public ScopeGroup(String name, HighlightColor color, MatchMode mode, boolean enabled, List<String> patterns) {
         this.name = name;
@@ -29,6 +44,7 @@ public final class ScopeGroup {
         if (patterns != null) {
             this.patterns.addAll(patterns);
         }
+        rebuildTemplates();
     }
 
     public String name() {
@@ -53,6 +69,7 @@ public final class ScopeGroup {
 
     public void setMode(MatchMode mode) {
         this.mode = mode;
+        rebuildTemplates();
     }
 
     public boolean enabled() {
@@ -72,10 +89,48 @@ public final class ScopeGroup {
         if (newPatterns != null) {
             patterns.addAll(newPatterns);
         }
+        rebuildTemplates();
     }
 
     public int patternCount() {
         return patterns.size();
+    }
+
+    /** Compile user-friendly URL placeholders once, not for every HTTP request. */
+    private void rebuildTemplates() {
+        templates.clear();
+        if (mode == MatchMode.REGEX) {
+            return;
+        }
+        for (String raw : patterns) {
+            String template = raw.trim();
+            if (!PLACEHOLDER.matcher(template).find()) {
+                continue;
+            }
+            int queryStart = template.indexOf('?');
+            Pattern withoutQuery = queryStart < 0 ? null
+                    : compileTemplate(template.substring(0, queryStart), true);
+            templates.put(template, new TemplatePatterns(compileTemplate(template, false), withoutQuery));
+        }
+    }
+
+    private Pattern compileTemplate(String template, boolean pathOnly) {
+        Matcher placeholders = PLACEHOLDER.matcher(template);
+        StringBuilder regex = new StringBuilder(mode == MatchMode.PREFIX ? "^" : "");
+        int previous = 0;
+        while (placeholders.find()) {
+            regex.append(Pattern.quote(template.substring(previous, placeholders.start())));
+            boolean inQuery = template.substring(0, placeholders.start()).indexOf('?') >= 0;
+            regex.append(inQuery ? "[^&#]+" : "[^/?#]+");
+            previous = placeholders.end();
+        }
+        regex.append(Pattern.quote(template.substring(previous)));
+        if (mode == MatchMode.PREFIX && !template.endsWith("/")) {
+            // A queryless request can match the path of a URL template,
+            // but a path placeholder must not swallow another segment.
+            regex.append(pathOnly ? "(?=$|#)" : "(?=$|[?#])");
+        }
+        return Pattern.compile(regex.toString(), Pattern.CASE_INSENSITIVE);
     }
 
     /**
@@ -109,16 +164,20 @@ public final class ScopeGroup {
 
     private boolean matches(String pattern, String full, String bare, String path) {
         String p = pattern.toLowerCase(Locale.ROOT);
+        TemplatePatterns template = templates.get(pattern);
         switch (mode) {
             case PREFIX:
                 if (p.startsWith("/")) {
-                    return prefixMatch(path, p);
+                    return template == null ? prefixMatch(path, p) : template.matches(path);
                 }
                 if (p.startsWith("http://") || p.startsWith("https://")) {
-                    return prefixMatch(full, p);
+                    return template == null ? prefixMatch(full, p) : template.matches(full);
                 }
-                return prefixMatch(bare, p);
+                return template == null ? prefixMatch(bare, p) : template.matches(bare);
             case CONTAINS:
+                if (template != null) {
+                    return template.matches(full) || template.matches(bare);
+                }
                 return full.toLowerCase(Locale.ROOT).contains(p)
                         || bare.toLowerCase(Locale.ROOT).contains(p);
             case REGEX:

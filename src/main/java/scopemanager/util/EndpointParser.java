@@ -1,4 +1,4 @@
-package scopehighlighter.util;
+package scopemanager.util;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;

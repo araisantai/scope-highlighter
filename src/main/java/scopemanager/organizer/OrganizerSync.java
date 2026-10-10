@@ -1,8 +1,12 @@
-package scopehighlighter.organizer;
+package scopemanager.organizer;
 
 import burp.api.montoya.persistence.PersistedObject;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -14,6 +18,7 @@ import java.util.Set;
  */
 public final class OrganizerSync {
 
+    // Preserve deduplication state in Burp projects created before the rename.
     private static final String KEY_SENT = "scopehighlighter.organizer.sent.v1";
     private static final int MAX_KEYS = 5000;
     private static final int FLUSH_EVERY = 25;
@@ -21,6 +26,19 @@ public final class OrganizerSync {
     private final Set<String> sent = new LinkedHashSet<>();
     private PersistedObject persistedData;
     private int sinceFlush = 0;
+
+    /** A single-line, bounded key; notes can contain newlines and be arbitrarily long. */
+    public static String keyFor(String requestKey, String notes) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(requestKey.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            digest.update(notes.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
+    }
 
     public synchronized void attach(PersistedObject data) {
         this.persistedData = data;

@@ -1,6 +1,6 @@
-package scopehighlighter.ui;
+package scopemanager.ui;
 
-import scopehighlighter.log.MessageRecord;
+import scopemanager.log.MessageRecord;
 
 import java.awt.Component;
 

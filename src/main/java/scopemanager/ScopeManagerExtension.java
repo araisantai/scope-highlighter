@@ -1,4 +1,4 @@
-package scopehighlighter;
+package scopemanager;
 
 import burp.api.montoya.BurpExtension;
 import burp.api.montoya.MontoyaApi;
@@ -9,17 +9,17 @@ import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.proxy.ProxyHttpRequestResponse;
-import scopehighlighter.http.HighlighterHandler;
-import scopehighlighter.log.MessageLog;
-import scopehighlighter.log.MessageRecord;
-import scopehighlighter.log.Source;
-import scopehighlighter.model.GroupStore;
-import scopehighlighter.model.ScopeGroup;
-import scopehighlighter.organizer.OrganizerSync;
-import scopehighlighter.ui.BurpMessageViewer;
-import scopehighlighter.ui.Host;
-import scopehighlighter.ui.MessageViewer;
-import scopehighlighter.ui.ScopeHighlighterTab;
+import scopemanager.http.HighlighterHandler;
+import scopemanager.log.MessageLog;
+import scopemanager.log.MessageRecord;
+import scopemanager.log.Source;
+import scopemanager.model.GroupStore;
+import scopemanager.model.ScopeGroup;
+import scopemanager.organizer.OrganizerSync;
+import scopemanager.ui.BurpMessageViewer;
+import scopemanager.ui.Host;
+import scopemanager.ui.MessageViewer;
+import scopemanager.ui.ScopeManagerTab;
 
 import javax.swing.SwingUtilities;
 import java.awt.Component;
@@ -30,28 +30,44 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Scope Highlighter - Burp Suite extension (Montoya API).
+ * Scope Manager - Burp Suite extension (Montoya API).
  *
  * - auto-highlights requests in Burp history per endpoint group
- * - "Scope Highlighter" tab: Excel-like endpoint grid with copy endpoint /
- *   show all / notes to organizer actions and a Burp-style context menu
+ * - "Scope Manager" tab: Excel-like endpoint grid with a notes toolbar
+ *   control, double-click results, and a Burp-style context menu
  * - request logger: Repeater/Intruder/History/Target requests stay
  *   recoverable and are saved inside the Burp project file
- * - automatic Organizer sync, noted with the group title
+ * - automatic Organizer sync for matching requests with user-written notes
  */
-public final class ScopeHighlighterExtension implements BurpExtension {
+public final class ScopeManagerExtension implements BurpExtension {
 
-    public static final String TAB_NAME = "Scope Highlighter";
-    public static final String VERSION = "v6";
+    public static final String TAB_NAME = "Scope Manager";
+    public static final String VERSION = "v10";
 
     private MontoyaApi api;
     private GroupStore store;
     private MessageLog messageLog;
     private OrganizerSync organizerSync;
+    private final ExecutorService organizerWorker = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "scope-manager-organizer");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final ExecutorService noteSyncWorker = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "scope-manager-notes");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final Set<String> organizerInFlight = ConcurrentHashMap.newKeySet();
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -62,21 +78,21 @@ public final class ScopeHighlighterExtension implements BurpExtension {
         try {
             store.attach(api.persistence().extensionData());
         } catch (Exception e) {
-            api.logging().logToError("Scope Highlighter: failed to load groups: " + e);
+            api.logging().logToError("Scope Manager: failed to load groups: " + e);
         }
 
         organizerSync = new OrganizerSync();
         try {
             organizerSync.attach(api.persistence().extensionData());
         } catch (Exception e) {
-            api.logging().logToError("Scope Highlighter: failed to load organizer state: " + e);
+            api.logging().logToError("Scope Manager: failed to load organizer state: " + e);
         }
 
         messageLog = new MessageLog();
         try {
             messageLog.attach(api.persistence().extensionData());
         } catch (Exception e) {
-            api.logging().logToError("Scope Highlighter: failed to load request log: " + e);
+            api.logging().logToError("Scope Manager: failed to load request log: " + e);
         }
         if (messageLog.size() == 0) {
             seedFromProxyHistory();
@@ -84,22 +100,27 @@ public final class ScopeHighlighterExtension implements BurpExtension {
 
         api.http().registerHttpHandler(new HighlighterHandler(api, store, messageLog, this::onRecorded));
         api.extension().registerUnloadingHandler(() -> {
+            organizerWorker.shutdown();
+            noteSyncWorker.shutdown();
             messageLog.saveNow();
             organizerSync.saveNow();
         });
 
         SwingUtilities.invokeLater(() -> {
             Host host = new BurpHost();
-            ScopeHighlighterTab tab = new ScopeHighlighterTab(store, host);
+            ScopeManagerTab tab = new ScopeManagerTab(store, host);
             // any change to groups/settings re-applies highlights automatically
             store.setChangeListener(() -> {
                 SwingUtilities.invokeLater(tab::refreshAll);
                 host.reapplyHighlights();
             });
             api.userInterface().registerSuiteTab(TAB_NAME, tab);
+            // Re-apply updated matcher rules to requests captured before reload.
+            // Startup must not clear unrelated user highlights.
+            applyHighlightsToHistory(false);
         });
 
-        api.logging().logToOutput("Scope Highlighter " + VERSION + " loaded \u2014 " + logSummary());
+        api.logging().logToOutput("Scope Manager " + VERSION + " loaded \u2014 " + logSummary());
     }
 
     /** One-line logger diagnostics (shown in the tab status and at startup). */
@@ -117,21 +138,25 @@ public final class ScopeHighlighterExtension implements BurpExtension {
 
     /** Every recorded request matching a group is auto-added to the Organizer. */
     private void onRecorded(MessageRecord record, ScopeGroup match) {
-        if (match == null || !store.isAutoOrganizerEnabled()) {
+        if (match == null || record.notes().isBlank()) {
             return;
         }
-        sendRecordToOrganizer(record, match.name(), match.color());
+        organizerWorker.execute(() -> sendRecordToOrganizer(record, match.name(), match.color()));
     }
 
     /**
-     * Sends one recorded exchange to the Organizer, noted with the group
-     * title and highlighted in the group color. Deduplicated via
+     * Sends one recorded exchange to the Organizer with its user note and
+     * the group color. Deduplicated via
      * {@link OrganizerSync}. NOTE: the Montoya API has no Organizer
-     * "collections" - the group title is written into the item's notes, which
-     * is the closest grouping mechanism available to extensions.
+     * "collections", so the group title can select requests but cannot create
+     * or choose a native Organizer collection.
      */
-    private boolean sendRecordToOrganizer(MessageRecord record, String note, HighlightColor color) {
-        if (!organizerSync.markSent(record.key())) {
+    private boolean sendRecordToOrganizer(MessageRecord record, String groupTitle, HighlightColor color) {
+        if (record.notes().isBlank()) {
+            return false;
+        }
+        String sentKey = OrganizerSync.keyFor(record.key(), record.notes());
+        if (organizerSync.alreadySent(sentKey) || !organizerInFlight.add(sentKey)) {
             return false;
         }
         try {
@@ -143,12 +168,17 @@ public final class ScopeHighlighterExtension implements BurpExtension {
                 HttpResponse response = HttpResponse.httpResponse(record.responseRaw());
                 api.organizer().sendToOrganizer(
                         HttpRequestResponse.httpRequestResponse(request, response,
-                                Annotations.annotations(note, color)));
+                                Annotations.annotations(record.notes(), color)));
             }
+            api.logging().logToOutput("Scope Manager: sent noted request matching scope group \""
+                    + groupTitle + "\" to Organizer Inbox");
+            organizerSync.markSent(sentKey);
             return true;
         } catch (Exception e) {
-            api.logging().logToError("Scope Highlighter: organizer send failed: " + e);
+            api.logging().logToError("Scope Manager: organizer send failed: " + e);
             return false;
+        } finally {
+            organizerInFlight.remove(sentKey);
         }
     }
 
@@ -173,10 +203,18 @@ public final class ScopeHighlighterExtension implements BurpExtension {
         public List<MessageRecord> collect(Source source, ScopeGroup matcher) {
             List<MessageRecord> out = new ArrayList<>();
             Set<String> keys = new HashSet<>();
+            List<MessageRecord> history = source == Source.ALL || source == Source.HISTORY
+                    ? proxyHistoryRecords(matcher) : List.of();
+            List<MessageRecord> target = source == Source.TARGET || source == Source.ALL
+                    ? siteMapRecords(matcher) : List.of();
+            List<MessageRecord> live = new ArrayList<>(history.size() + target.size());
+            live.addAll(history);
+            live.addAll(target);
+            messageLog.mergeNotes(live);
             if (source == Source.ALL || source == Source.HISTORY) {
                 // live proxy history is authoritative and includes entries the
                 // logger never saw (loaded before the extension, or evicted)
-                for (MessageRecord record : proxyHistoryRecords()) {
+                for (MessageRecord record : history) {
                     keys.add(record.key());
                     if (matcher.match(record.url()).isPresent()) {
                         out.add(record);
@@ -184,7 +222,7 @@ public final class ScopeHighlighterExtension implements BurpExtension {
                 }
             }
             if (source == Source.TARGET || source == Source.ALL) {
-                for (MessageRecord record : siteMapRecords()) {
+                for (MessageRecord record : target) {
                     if (!keys.contains(record.key()) && matcher.match(record.url()).isPresent()) {
                         out.add(record);
                     }
@@ -201,6 +239,7 @@ public final class ScopeHighlighterExtension implements BurpExtension {
                 }
             }
             out.sort(Comparator.comparingLong(MessageRecord::timestamp));
+            queueOrganizerSweep(out);
             return out;
         }
 
@@ -236,9 +275,9 @@ public final class ScopeHighlighterExtension implements BurpExtension {
             HttpRequest request = buildRequest(endpointOrUrl);
             if (request != null) {
                 api.repeater().sendToRepeater(request);
-                log("Scope Highlighter: sent " + endpointOrUrl + " to Repeater");
+                log("Scope Manager: sent " + endpointOrUrl + " to Repeater");
             } else {
-                log("Scope Highlighter: no request available yet for " + endpointOrUrl
+                log("Scope Manager: no request available yet for " + endpointOrUrl
                         + " (browse the endpoint once, then try again)");
             }
         }
@@ -248,9 +287,9 @@ public final class ScopeHighlighterExtension implements BurpExtension {
             HttpRequest request = buildRequest(endpointOrUrl);
             if (request != null) {
                 api.intruder().sendToIntruder(request);
-                log("Scope Highlighter: sent " + endpointOrUrl + " to Intruder");
+                log("Scope Manager: sent " + endpointOrUrl + " to Intruder");
             } else {
-                log("Scope Highlighter: no request available yet for " + endpointOrUrl
+                log("Scope Manager: no request available yet for " + endpointOrUrl
                         + " (browse the endpoint once, then try again)");
             }
         }
@@ -260,40 +299,67 @@ public final class ScopeHighlighterExtension implements BurpExtension {
             HttpRequest request = buildRequest(endpointOrUrl);
             if (request != null) {
                 api.comparer().sendToComparer(burp.api.montoya.core.ByteArray.byteArray(request.toString()));
-                log("Scope Highlighter: sent " + endpointOrUrl + " to Comparer");
+                log("Scope Manager: sent " + endpointOrUrl + " to Comparer");
             } else {
-                log("Scope Highlighter: no request available yet for " + endpointOrUrl
+                log("Scope Manager: no request available yet for " + endpointOrUrl
                         + " (browse the endpoint once, then try again)");
             }
         }
 
         @Override
         public List<MessageRecord> allKnownRecords() {
-            Set<String> keys = new HashSet<>();
-            List<MessageRecord> out = new ArrayList<>();
+            Map<String, MessageRecord> byKey = new LinkedHashMap<>();
             for (MessageRecord record : messageLog.entries()) {
-                keys.add(record.key());
-                out.add(record);
+                byKey.put(record.key(), record);
             }
-            for (MessageRecord record : proxyHistoryRecords()) {
-                if (keys.add(record.key())) {
-                    out.add(record);
-                }
+            List<MessageRecord> history = proxyHistoryRecords();
+            for (MessageRecord record : history) {
+                byKey.put(record.key(), record);
             }
-            for (MessageRecord record : siteMapRecords()) {
-                if (keys.add(record.key())) {
-                    out.add(record);
-                }
+            List<MessageRecord> target = siteMapRecords();
+            for (MessageRecord record : target) {
+                byKey.putIfAbsent(record.key(), record);
             }
+            List<MessageRecord> live = new ArrayList<>(history.size() + target.size());
+            live.addAll(history);
+            live.addAll(target);
+            messageLog.mergeNotes(live);
+            List<MessageRecord> out = new ArrayList<>(byKey.values());
             out.sort(Comparator.comparingLong(MessageRecord::timestamp));
+            queueOrganizerSweep(out);
             return out;
+        }
+
+        /** Catch up notes discovered while reading Burp's live History or Target. */
+        private void queueOrganizerSweep(List<MessageRecord> records) {
+            if (organizerWorker.isShutdown()) {
+                return;
+            }
+            List<MessageRecord> pending = new ArrayList<>();
+            for (MessageRecord record : records) {
+                if (!record.notes().isBlank()
+                        && !organizerSync.alreadySent(OrganizerSync.keyFor(record.key(), record.notes()))) {
+                    pending.add(record);
+                }
+            }
+            if (!pending.isEmpty()) {
+                organizerWorker.execute(() -> {
+                    for (MessageRecord record : pending) {
+                        store.findMatch(record.url()).ifPresent(match ->
+                                sendRecordToOrganizer(record, match.group().name(), match.group().color()));
+                    }
+                });
+            }
         }
 
         @Override
         public int syncToOrganizer(ScopeGroup matcher) {
             int sent = 0;
-            for (MessageRecord record : messageLog.entries()) {
-                if (matcher.match(record.url()).isPresent()
+            Set<String> handled = new HashSet<>();
+            for (MessageRecord record : allKnownRecords()) {
+                if (!record.notes().isBlank()
+                        && handled.add(record.key())
+                        && matcher.match(record.url()).isPresent()
                         && sendRecordToOrganizer(record, matcher.name(), matcher.color())) {
                     sent++;
                 }
@@ -302,12 +368,58 @@ public final class ScopeHighlighterExtension implements BurpExtension {
         }
 
         @Override
+        public int syncAllToOrganizer() {
+            int sent = 0;
+            Set<String> handled = new HashSet<>();
+            for (MessageRecord record : allKnownRecords()) {
+                if (record.notes().isBlank() || !handled.add(record.key())) {
+                    continue;
+                }
+                Optional<GroupStore.Match> match = store.findMatch(record.url());
+                if (match.isPresent() && sendRecordToOrganizer(record,
+                        match.get().group().name(), match.get().group().color())) {
+                    sent++;
+                }
+            }
+            return sent;
+        }
+
+        @Override
+        public void updateNotes(MessageRecord record, String notes) {
+            String value = notes == null ? "" : notes;
+            messageLog.updateNotes(record.key(), value);
+            noteSyncWorker.execute(() -> {
+                try {
+                    for (ProxyHttpRequestResponse entry : api.proxy().history()) {
+                        MessageRecord live = toRecord(entry);
+                        if (live != null && live.key().equals(record.key())) {
+                            entry.annotations().setNotes(value);
+                        }
+                    }
+                    for (HttpRequestResponse entry : api.siteMap().requestResponses()) {
+                        MessageRecord live = toRecord(entry);
+                        if (live != null && live.key().equals(record.key()) && entry.annotations() != null) {
+                            entry.annotations().setNotes(value);
+                        }
+                    }
+                } catch (Exception e) {
+                    log("Scope Manager: note sync failed: " + e);
+                }
+            });
+            if (!value.isBlank()) {
+                store.findMatch(record.url()).ifPresent(match -> organizerWorker.execute(
+                        () -> sendRecordToOrganizer(record.withNotes(value),
+                                match.group().name(), match.group().color())));
+            }
+        }
+
+        @Override
         public void copyToClipboard(String text) {
             try {
                 Toolkit.getDefaultToolkit().getSystemClipboard()
                         .setContents(new StringSelection(text), null);
             } catch (Exception e) {
-                log("Scope Highlighter: clipboard failed: " + e);
+                log("Scope Manager: clipboard failed: " + e);
             }
         }
 
@@ -325,7 +437,7 @@ public final class ScopeHighlighterExtension implements BurpExtension {
     private HttpRequest buildRequest(String endpointOrUrl) {
         try {
             ScopeGroup matcher = new ScopeGroup("", HighlightColor.RED,
-                    scopehighlighter.model.MatchMode.PREFIX, true, List.of(endpointOrUrl));
+                    scopemanager.model.MatchMode.PREFIX, true, List.of(endpointOrUrl));
             List<MessageRecord> records = messageLog.filter(r -> matcher.match(r.url()).isPresent());
             if (!records.isEmpty()) {
                 MessageRecord latest = records.get(records.size() - 1);
@@ -335,7 +447,7 @@ public final class ScopeHighlighterExtension implements BurpExtension {
                 return HttpRequest.httpRequestFromUrl(endpointOrUrl);
             }
         } catch (Exception e) {
-            api.logging().logToError("Scope Highlighter: build request failed: " + e);
+            api.logging().logToError("Scope Manager: build request failed: " + e);
         }
         return null;
     }
@@ -364,26 +476,41 @@ public final class ScopeHighlighterExtension implements BurpExtension {
      * included too.
      */
     private List<MessageRecord> siteMapRecords() {
+        return siteMapRecords(null);
+    }
+
+    private List<MessageRecord> siteMapRecords(ScopeGroup matcher) {
         List<MessageRecord> out = new ArrayList<>();
         try {
             for (HttpRequestResponse entry : api.siteMap().requestResponses()) {
+                if (entry == null || entry.request() == null
+                        || (matcher != null && matcher.match(entry.request().url()).isEmpty())) {
+                    continue;
+                }
                 MessageRecord record = toRecord(entry);
                 if (record != null) {
                     out.add(record);
                 }
             }
         } catch (Exception e) {
-            api.logging().logToError("Scope Highlighter: site map read failed: " + e);
+            api.logging().logToError("Scope Manager: site map read failed: " + e);
         }
         return out;
     }
 
     /** Burp's Proxy history, queried live (labelled "History"). */
     private List<MessageRecord> proxyHistoryRecords() {
+        return proxyHistoryRecords(null);
+    }
+
+    private List<MessageRecord> proxyHistoryRecords(ScopeGroup matcher) {
         List<MessageRecord> out = new ArrayList<>();
         try {
             for (ProxyHttpRequestResponse entry : api.proxy().history()) {
                 try {
+                    if (matcher != null && matcher.match(entry.finalRequest().url()).isEmpty()) {
+                        continue;
+                    }
                     String requestRaw = MessageLog.clampRaw(entry.request().toString());
                     String responseRaw = "";
                     int status = 0;
@@ -402,7 +529,7 @@ public final class ScopeHighlighterExtension implements BurpExtension {
                 }
             }
         } catch (Exception e) {
-            api.logging().logToError("Scope Highlighter: proxy history read failed: " + e);
+            api.logging().logToError("Scope Manager: proxy history read failed: " + e);
         }
         return out;
     }
@@ -425,6 +552,25 @@ public final class ScopeHighlighterExtension implements BurpExtension {
                 status, requestRaw.length(), responseRaw.length(), requestRaw, responseRaw, notes);
     }
 
+    private static MessageRecord toRecord(ProxyHttpRequestResponse entry) {
+        if (entry == null || entry.request() == null) {
+            return null;
+        }
+        String requestRaw = MessageLog.clampRaw(entry.request().toString());
+        String responseRaw = "";
+        int status = 0;
+        if (entry.hasResponse() && entry.response() != null) {
+            responseRaw = MessageLog.clampRaw(entry.response().toString());
+            status = entry.response().statusCode();
+        }
+        long timestamp = entry.time() == null ? 0 : entry.time().toInstant().toEpochMilli();
+        String notes = entry.annotations() != null && entry.annotations().hasNotes()
+                ? entry.annotations().notes() : "";
+        return new MessageRecord(timestamp, "History", entry.finalRequest().method(),
+                entry.finalRequest().url(), status, requestRaw.length(), responseRaw.length(),
+                requestRaw, responseRaw, notes);
+    }
+
     // ------------------------------------------------------------------
     // auto-highlighting of existing traffic (no manual button)
     // ------------------------------------------------------------------
@@ -436,6 +582,10 @@ public final class ScopeHighlighterExtension implements BurpExtension {
      * group titles - so removing or changing a group updates history instantly.
      */
     private void applyHighlightsToHistory() {
+        applyHighlightsToHistory(true);
+    }
+
+    private void applyHighlightsToHistory(boolean clearUnmatched) {
         Thread worker = new Thread(() -> {
             int colored = 0;
             int cleared = 0;
@@ -447,33 +597,21 @@ public final class ScopeHighlighterExtension implements BurpExtension {
                         Optional<GroupStore.Match> match = store.findMatch(url);
                         if (match.isPresent()) {
                             annotations.setHighlightColor(match.get().group().color());
-                            if (store.isWriteNotesEnabled() && !annotations.hasNotes()) {
-                                annotations.setNotes(match.get().group().name());
-                            }
                             colored++;
-                        } else if (annotations.hasHighlightColor()
-                                || (annotations.hasNotes() && store.isKnownName(annotations.notes()))) {
-                            boolean ours = !annotations.hasNotes() || store.isKnownName(annotations.notes());
-                            if (ours) {
-                                if (annotations.hasHighlightColor()) {
-                                    annotations.setHighlightColor(HighlightColor.NONE);
-                                }
-                                if (annotations.hasNotes() && store.isKnownName(annotations.notes())) {
-                                    annotations.setNotes("");
-                                }
-                                cleared++;
-                            }
+                        } else if (clearUnmatched && annotations.hasHighlightColor()) {
+                            annotations.setHighlightColor(HighlightColor.NONE);
+                            cleared++;
                         }
                     } catch (Exception ignored) {
                         // one odd entry must not abort the refresh
                     }
                 }
-                api.logging().logToOutput("Scope Highlighter: auto-applied highlights ("
+                api.logging().logToOutput("Scope Manager: auto-applied highlights ("
                         + colored + " set, " + cleared + " cleared) on proxy history");
             } catch (Exception e) {
-                api.logging().logToError("Scope Highlighter: highlight refresh failed: " + e);
+                api.logging().logToError("Scope Manager: highlight refresh failed: " + e);
             }
-        }, "scope-highlighter-apply");
+        }, "scope-manager-apply");
         worker.setDaemon(true);
         worker.start();
     }
@@ -504,9 +642,9 @@ public final class ScopeHighlighterExtension implements BurpExtension {
                     // skip unreadable entries
                 }
             }
-            api.logging().logToOutput("Scope Highlighter: recorded existing proxy history into the logger");
+            api.logging().logToOutput("Scope Manager: recorded existing proxy history into the logger");
         } catch (Exception e) {
-            api.logging().logToError("Scope Highlighter: history seeding failed: " + e);
+            api.logging().logToError("Scope Manager: history seeding failed: " + e);
         }
     }
 }

@@ -1,4 +1,4 @@
-package scopehighlighter.model;
+package scopemanager.model;
 
 import burp.api.montoya.core.HighlightColor;
 import burp.api.montoya.persistence.PersistedObject;
@@ -22,6 +22,7 @@ import java.util.Set;
  */
 public final class GroupStore {
 
+    // Keep legacy persistence keys so existing Burp projects retain their data.
     private static final String KEY_GROUPS = "scopehighlighter.state.v1";
     private static final String KEY_AUTO = "scopehighlighter.auto_highlight";
     private static final String KEY_NOTES = "scopehighlighter.write_notes";
@@ -49,7 +50,7 @@ public final class GroupStore {
     private final List<ScopeGroup> groups = new ArrayList<>();
     private final Set<String> knownNames = new LinkedHashSet<>();
     private volatile boolean autoHighlight = true;
-    private volatile boolean writeNotes = true;
+    private volatile boolean writeNotes = false;
     private volatile boolean autoOrganizer = true;
     private PersistedObject persistedData;
     private Runnable changeListener;

@@ -1,4 +1,4 @@
-package scopehighlighter.log;
+package scopemanager.log;
 
 /**
  * The sources the "show all" window can reveal requests from, plus ALL.

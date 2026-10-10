@@ -14,4 +14,4 @@ mkdir -p build/test-classes
 find src/main/java src/test/java -name '*.java' > build/test-sources.txt
 javac --release 17 -cp "$API_JAR" -d build/test-classes @build/test-sources.txt
 
-java -cp "build/test-classes:$API_JAR" scopehighlighter.SelfTest
+java -Djava.awt.headless=true -cp "build/test-classes:$API_JAR" scopemanager.SelfTest

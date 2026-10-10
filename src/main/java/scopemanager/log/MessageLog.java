@@ -1,10 +1,12 @@
-package scopehighlighter.log;
+package scopemanager.log;
 
 import burp.api.montoya.persistence.PersistedObject;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.function.Predicate;
 
@@ -26,10 +28,11 @@ import java.util.function.Predicate;
  */
 public final class MessageLog {
 
-    public static final int MAX_ENTRIES = 3000;
-    public static final int FLUSH_EVERY = 50;
-    public static final int MAX_RAW_CHARS = 200_000;
+    public static final int MAX_ENTRIES = 1500;
+    public static final int FLUSH_EVERY = 250;
+    public static final int MAX_RAW_CHARS = 50_000;
 
+    // Preserve the original keys when the extension is renamed.
     private static final String KEY_LOG = "scopehighlighter.log.v2";
     private static final String[] LEGACY_LIST_KEYS = {
             "scopehighlighter.log.meta", "scopehighlighter.log.req", "scopehighlighter.log.resp"};
@@ -37,6 +40,10 @@ public final class MessageLog {
     private final List<MessageRecord> records = new ArrayList<>();
     private PersistedObject persistedData;
     private int sinceFlush = 0;
+    private final java.util.concurrent.atomic.AtomicBoolean saveRunning =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean savePending =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     // ------------------------------------------------------------------
     // persistence
@@ -65,12 +72,40 @@ public final class MessageLog {
         }
     }
 
-    public synchronized void saveNow() {
-        if (persistedData == null) {
+    public void saveNow() {
+        PersistedObject data;
+        List<MessageRecord> snapshot;
+        synchronized (this) {
+            data = persistedData;
+            snapshot = new ArrayList<>(records);
+            sinceFlush = 0;
+        }
+        if (data == null) {
             return;
         }
-        persistedData.setString(KEY_LOG, toBlob());
-        sinceFlush = 0;
+        data.setString(KEY_LOG, toBlob(snapshot));
+    }
+
+    private void saveLater() {
+        savePending.set(true);
+        if (!saveRunning.compareAndSet(false, true)) {
+            return;
+        }
+        Thread worker = new Thread(() -> {
+            try {
+                do {
+                    savePending.set(false);
+                    saveNow();
+                } while (savePending.get());
+            } finally {
+                saveRunning.set(false);
+                if (savePending.get()) {
+                    saveLater();
+                }
+            }
+        }, "scope-manager-save");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     /**
@@ -80,8 +115,12 @@ public final class MessageLog {
      * with meta = ts|source|status|reqLen|respLen|method|url.
      */
     public synchronized String toBlob() {
+        return toBlob(new ArrayList<>(records));
+    }
+
+    private static String toBlob(List<MessageRecord> snapshot) {
         StringBuilder sb = new StringBuilder("v2\n");
-        for (MessageRecord record : records) {
+        for (MessageRecord record : snapshot) {
             sb.append(b64(record.toMetaLine())).append('\t')
                     .append(b64(record.requestRaw())).append('\t')
                     .append(b64(record.responseRaw())).append('\n');
@@ -128,13 +167,78 @@ public final class MessageLog {
     // recording / reading
     // ------------------------------------------------------------------
 
-    public synchronized void record(MessageRecord record) {
-        records.add(record);
-        sinceFlush++;
-        trim();
-        if (sinceFlush >= FLUSH_EVERY) {
-            saveNow();
+    public void record(MessageRecord record) {
+        boolean shouldSave;
+        synchronized (this) {
+            records.add(record);
+            sinceFlush++;
+            trim();
+            shouldSave = sinceFlush >= FLUSH_EVERY;
         }
+        if (shouldSave) {
+            saveLater();
+        }
+    }
+
+    /**
+     * Updates every copy of an exchange. The same request can be visible in
+     * more than one Burp tool, but its note is a single user-owned value.
+     */
+    public int updateNotes(String recordKey, String notes) {
+        int updated = 0;
+        String value = notes == null ? "" : notes;
+        synchronized (this) {
+            for (int i = 0; i < records.size(); i++) {
+                MessageRecord record = records.get(i);
+                if (record.key().equals(recordKey) && !record.notes().equals(value)) {
+                    records.set(i, record.withNotes(value));
+                    updated++;
+                }
+            }
+        }
+        if (updated > 0) {
+            saveLater();
+        }
+        return updated;
+    }
+
+    /** Pull a note changed in a live Burp view into the persisted log. */
+    public synchronized void mergeNotes(MessageRecord authoritative) {
+        if (authoritative == null) {
+            return;
+        }
+        updateNotes(authoritative.key(), authoritative.notes());
+    }
+
+    /**
+     * Batch version used while reading Burp histories. It indexes the live
+     * records once, scans the local log once, and persists at most once.
+     */
+    public int mergeNotes(List<MessageRecord> authoritativeRecords) {
+        if (authoritativeRecords == null || authoritativeRecords.isEmpty()) {
+            return 0;
+        }
+        Map<String, String> notesByKey = new HashMap<>();
+        for (MessageRecord record : authoritativeRecords) {
+            if (record != null) {
+                notesByKey.put(record.key(), record.notes());
+            }
+        }
+        int updated = 0;
+        synchronized (this) {
+            for (int i = 0; i < records.size(); i++) {
+                MessageRecord record = records.get(i);
+                String notes = notesByKey.get(record.key());
+                if (notes != null && !record.notes().equals(notes)) {
+                    records.set(i, record.withNotes(notes));
+                    updated++;
+                }
+            }
+        }
+        if (updated > 0) {
+            saveLater();
+        }
+        return updated;
     }
 
     public synchronized int size() {
@@ -170,6 +274,6 @@ public final class MessageLog {
         if (raw.length() <= MAX_RAW_CHARS) {
             return raw;
         }
-        return raw.substring(0, MAX_RAW_CHARS) + "\n...[truncated by Scope Highlighter]";
+        return raw.substring(0, MAX_RAW_CHARS) + "\n...[truncated by Scope Manager]";
     }
 }

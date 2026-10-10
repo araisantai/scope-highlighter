@@ -1,8 +1,8 @@
-package scopehighlighter.ui;
+package scopemanager.ui;
 
-import scopehighlighter.log.MessageRecord;
-import scopehighlighter.log.Source;
-import scopehighlighter.model.ScopeGroup;
+import scopemanager.log.MessageRecord;
+import scopemanager.log.Source;
+import scopemanager.model.ScopeGroup;
 
 import java.awt.Component;
 import java.util.List;
@@ -35,11 +35,11 @@ public interface Host {
     /** Context menu / actions: send a request for this endpoint to Comparer. */
     void sendToComparer(String endpointOrUrl);
 
-    /**
-     * "notes to organizer": send all recorded requests matching the matcher
-     * to Burp's Organizer, noted with the group title (deduplicated).
-     */
+    /** Send recorded requests with notes matching one row to Organizer Inbox. */
     int syncToOrganizer(ScopeGroup matcher);
+
+    /** Send currently known, grouped requests with notes to Organizer Inbox. */
+    int syncAllToOrganizer();
 
     /** Copy plain text to the system clipboard. */
     void copyToClipboard(String text);
@@ -56,4 +56,7 @@ public interface Host {
      * the "show all" diagnostics.
      */
     List<MessageRecord> allKnownRecords();
+
+    /** Update this exchange's note in the extension log and mutable Burp views. */
+    void updateNotes(MessageRecord record, String notes);
 }

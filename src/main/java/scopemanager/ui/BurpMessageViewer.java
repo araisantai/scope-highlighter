@@ -1,4 +1,4 @@
-package scopehighlighter.ui;
+package scopemanager.ui;
 
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
@@ -6,7 +6,7 @@ import burp.api.montoya.ui.UserInterface;
 import burp.api.montoya.ui.editor.EditorOptions;
 import burp.api.montoya.ui.editor.HttpRequestEditor;
 import burp.api.montoya.ui.editor.HttpResponseEditor;
-import scopehighlighter.log.MessageRecord;
+import scopemanager.log.MessageRecord;
 
 import javax.swing.JTextArea;
 import java.awt.Component;

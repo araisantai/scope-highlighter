@@ -1,9 +1,9 @@
-package scopehighlighter.ui;
+package scopemanager.ui;
 
 import burp.api.montoya.core.HighlightColor;
-import scopehighlighter.model.MatchMode;
-import scopehighlighter.model.ScopeGroup;
-import scopehighlighter.util.EndpointParser;
+import scopemanager.model.MatchMode;
+import scopemanager.model.ScopeGroup;
+import scopemanager.util.EndpointParser;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -143,11 +143,8 @@ public final class GroupDialog extends JDialog {
         c.weightx = 1.0;
         form.add(modeCombo, c);
 
-        JLabel help = new JLabel(
-                "<html><body style='width:430px'>Endpoints (paste straight from Excel): one endpoint per cell/line. "
-                        + "Tabs and newlines are treated as separators, commas too (except in regex patterns). "
-                        + "Examples: <b>https://admin.site.com/career</b>, <b>/admin/verify-location</b>, "
-                        + "<b>admin.site.com</b>. Lines starting with # are ignored.</body></html>");
+        JLabel help = new JLabel("Endpoints: paste one per line or directly from Excel.");
+        help.setToolTipText("Tabs and commas separate entries; lines starting with # are ignored.");
         c.gridx = 0;
         c.gridy = 3;
         c.gridwidth = 2;
@@ -193,7 +190,7 @@ public final class GroupDialog extends JDialog {
     private void onOk() {
         String name = nameField.getText().trim();
         if (name.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "Please enter a group title.", "Scope Highlighter",
+            JOptionPane.showMessageDialog(this, "Please enter a group title.", "Scope Manager",
                     JOptionPane.WARNING_MESSAGE);
             return;
         }
@@ -201,7 +198,7 @@ public final class GroupDialog extends JDialog {
         if (endpoints.isEmpty()) {
             JOptionPane.showMessageDialog(this,
                     "No endpoints found. Paste at least one endpoint (one per line).",
-                    "Scope Highlighter", JOptionPane.WARNING_MESSAGE);
+                    "Scope Manager", JOptionPane.WARNING_MESSAGE);
             return;
         }
         result = new ScopeGroup(

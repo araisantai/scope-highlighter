@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build the Scope Highlighter Burp extension.
-# Produces: dist/scope-highlighter.jar  (load this in Burp > Extensions > Add > Java)
+# Build the Scope Manager Burp extension.
+# Produces: dist/scope-manager.jar  (load this in Burp > Extensions > Add > Java)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -22,9 +22,9 @@ javac --release 17 -Xlint:all,-serial -cp "$API_JAR" -d build/classes @build/sou
 
 cat > build/MANIFEST.MF <<'EOF'
 Manifest-Version: 1.0
-Extension-Entrypoint: scopehighlighter.ScopeHighlighterExtension
+Extension-Entrypoint: scopemanager.ScopeManagerExtension
 EOF
 
-jar --create --file dist/scope-highlighter.jar --manifest build/MANIFEST.MF -C build/classes .
+jar --create --file dist/scope-manager.jar --manifest build/MANIFEST.MF -C build/classes .
 
-echo "Built $(pwd)/dist/scope-highlighter.jar"
+echo "Built $(pwd)/dist/scope-manager.jar"

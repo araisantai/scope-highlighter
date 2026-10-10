@@ -1,12 +1,13 @@
-package scopehighlighter.ui;
+package scopemanager.ui;
 
-import scopehighlighter.log.MessageRecord;
-import scopehighlighter.log.Source;
-import scopehighlighter.model.ScopeGroup;
+import scopemanager.log.MessageRecord;
+import scopemanager.log.Source;
+import scopemanager.model.ScopeGroup;
 
 import javax.swing.BorderFactory;
 import javax.swing.ButtonGroup;
 import javax.swing.BoxLayout;
+import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -17,6 +18,7 @@ import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.JToggleButton;
 import javax.swing.ListSelectionModel;
+import javax.swing.SwingWorker;
 import javax.swing.Timer;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
@@ -27,6 +29,8 @@ import java.awt.Color;
 import java.awt.Component;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.text.SimpleDateFormat;
@@ -40,8 +44,8 @@ import javax.swing.JFrame;
  * The "show all" window: every recorded request of one endpoint (or one whole
  * group), with a source chooser (show all / repeater / intruder / target /
  * proxy history), Burp's own request/response message editors, an
- * Inspector-style details pane with the notes, and live refresh so upcoming
- * requests appear automatically.
+ * Inspector-style details pane with the notes. Requests are loaded off the
+ * Swing event thread so the window opens promptly even for large histories.
  */
 public final class ResultsFrame extends JFrame {
 
@@ -56,8 +60,9 @@ public final class ResultsFrame extends JFrame {
     private final JTextField searchField = new JTextField(18);
     private final JLabel summaryLabel = new JLabel(" ");
     private final JLabel countsLabel = new JLabel(" ");
+    private final JButton refreshButton = new JButton("Refresh");
     private final JToggleButton[] filterButtons = new JToggleButton[Source.values().length];
-    private final Timer liveTimer;
+    private SwingWorker<List<MessageRecord>, Void> loadWorker;
 
     // inspector-style details pane
     private final DetailTableModel detailModel = new DetailTableModel();
@@ -65,9 +70,11 @@ public final class ResultsFrame extends JFrame {
     private final JTextArea notesArea = new JTextArea(3, 20);
 
     private Source currentSource = Source.ALL;
+    private MessageRecord noteRecord;
+    private boolean loadingNote;
 
     public ResultsFrame(String title, ScopeGroup matcher, Host host) {
-        super("Scope Highlighter \u2014 show all \u2014 " + title);
+        super("Scope Manager \u2014 show all \u2014 " + title);
         this.matcher = matcher;
         this.host = host;
         this.tableModel = new ResultsTableModel(visible, GroupDialog.lightTint(matcher.color()));
@@ -83,10 +90,19 @@ public final class ResultsFrame extends JFrame {
         add(buildCenter(), BorderLayout.CENTER);
         add(countsLabel, BorderLayout.SOUTH);
 
-        notesArea.setEditable(false);
+        notesArea.setEditable(true);
         notesArea.setLineWrap(true);
         notesArea.setWrapStyleWord(true);
         notesArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 12));
+        notesArea.setToolTipText("Edit the request note; an empty value is preserved as empty");
+        notesArea.getDocument().addDocumentListener(new DocumentListener() {
+            @Override public void insertUpdate(DocumentEvent e) { noteChanged(); }
+            @Override public void removeUpdate(DocumentEvent e) { noteChanged(); }
+            @Override public void changedUpdate(DocumentEvent e) { noteChanged(); }
+        });
+        notesArea.addFocusListener(new FocusAdapter() {
+            @Override public void focusLost(FocusEvent e) { saveNoteNow(); }
+        });
         detailTable.setTableHeader(null);
         detailTable.setRowHeight(19);
         detailTable.getColumnModel().getColumn(0).setMaxWidth(120);
@@ -110,15 +126,13 @@ public final class ResultsFrame extends JFrame {
 
         setSize(1250, 800);
         host.applyTheme(this);
-
-        // live refresh: upcoming requests of this endpoint show up automatically
-        liveTimer = new Timer(2000, e -> refresh(true));
-        liveTimer.setRepeats(true);
-        liveTimer.start();
         addWindowListener(new WindowAdapter() {
             @Override
-            public void windowClosed(WindowEvent e) {
-                liveTimer.stop();
+            public void windowClosed(WindowEvent event) {
+                if (loadWorker != null && !loadWorker.isDone()) {
+                    loadWorker.cancel(true);
+                }
+                saveNoteNow();
             }
         });
 
@@ -143,7 +157,7 @@ public final class ResultsFrame extends JFrame {
             button.setToolTipText("Show requests recorded as \"" + source.buttonLabel() + "\" for this endpoint");
             button.addActionListener(e -> {
                 currentSource = source;
-                refresh(false);
+                applySearch();
             });
             filterButtons[source.ordinal()] = button;
             group.add(button);
@@ -158,8 +172,11 @@ public final class ResultsFrame extends JFrame {
         center.add(summaryLabel);
 
         JPanel search = new JPanel(new BorderLayout(4, 0));
+        refreshButton.setToolTipText("Reload notes and requests from Burp");
+        refreshButton.addActionListener(e -> refresh(true));
         search.add(new JLabel("filter: "), BorderLayout.WEST);
         search.add(searchField, BorderLayout.CENTER);
+        search.add(refreshButton, BorderLayout.EAST);
         searchField.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent e) {
@@ -195,7 +212,7 @@ public final class ResultsFrame extends JFrame {
         inspector.add(new JScrollPane(detailTable), BorderLayout.CENTER);
         JPanel notesPanel = new JPanel(new BorderLayout());
         notesPanel.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
-        notesPanel.add(new JLabel("Notes"), BorderLayout.NORTH);
+        notesPanel.add(new JLabel("Notes (editable; blank by default)"), BorderLayout.NORTH);
         notesPanel.add(new JScrollPane(notesArea), BorderLayout.CENTER);
         inspector.add(notesPanel, BorderLayout.SOUTH);
 
@@ -209,26 +226,54 @@ public final class ResultsFrame extends JFrame {
 
     // ------------------------------------------------------------------
 
-    /** Re-collects from the host; keepSelection preserves the selected message. */
+    /** Load matching requests once in the background; source filters use the snapshot. */
     private void refresh(boolean keepSelection) {
+        saveNoteNow();
         MessageRecord selected = null;
         int selectedRow = table.getSelectedRow();
         if (selectedRow >= 0 && selectedRow < visible.size()) {
             selected = visible.get(selectedRow);
         }
+        final MessageRecord priorSelection = keepSelection ? selected : null;
+        if (loadWorker != null && !loadWorker.isDone()) {
+            loadWorker.cancel(true);
+        }
+        refreshButton.setEnabled(false);
+        summaryLabel.setText(" Loading matching requests...");
+        loadWorker = new SwingWorker<>() {
+            @Override
+            protected List<MessageRecord> doInBackground() {
+                return host.collect(Source.ALL, matcher);
+            }
 
-        snapshot.clear();
-        snapshot.addAll(host.collect(currentSource, matcher));
-        applySearch();
-
-        if (keepSelection && selected != null) {
-            for (int i = 0; i < visible.size(); i++) {
-                if (sameRecord(visible.get(i), selected)) {
-                    table.setRowSelectionInterval(i, i);
+            @Override
+            protected void done() {
+                if (loadWorker != this) {
                     return;
                 }
+                refreshButton.setEnabled(true);
+                if (isCancelled() || !isDisplayable()) {
+                    return;
+                }
+                try {
+                    snapshot.clear();
+                    snapshot.addAll(get());
+                    applySearch();
+                    if (priorSelection != null) {
+                        for (int i = 0; i < visible.size(); i++) {
+                            if (sameRecord(visible.get(i), priorSelection)) {
+                                table.setRowSelectionInterval(i, i);
+                                break;
+                            }
+                        }
+                    }
+                } catch (Exception error) {
+                    summaryLabel.setText(" Unable to load requests: " + error.getMessage());
+                    host.log("Scope Manager: Show All load failed: " + error);
+                }
             }
-        }
+        };
+        loadWorker.execute();
     }
 
     private static boolean sameRecord(MessageRecord a, MessageRecord b) {
@@ -239,54 +284,44 @@ public final class ResultsFrame extends JFrame {
         String query = searchField.getText().trim().toLowerCase();
         visible.clear();
         for (MessageRecord record : snapshot) {
-            if (query.isEmpty()
+            if ((currentSource == Source.ALL || record.isFrom(currentSource.recordLabel()))
+                    && (query.isEmpty()
                     || record.url().toLowerCase().contains(query)
                     || record.method().toLowerCase().contains(query)
-                    || record.source().toLowerCase().contains(query)) {
+                    || record.source().toLowerCase().contains(query))) {
                 visible.add(record);
             }
         }
         tableModel.fireTableDataChanged();
-        summaryLabel.setText(" " + currentSource.buttonLabel() + ": " + visible.size()
-                + (query.isEmpty() ? "" : " (filtered from " + snapshot.size() + ")")
-                + " request(s) \u2014 live: upcoming requests appear automatically");
+        if (loadWorker != null && !loadWorker.isDone() && snapshot.isEmpty()) {
+            summaryLabel.setText(" Loading matching requests...");
+        } else {
+            summaryLabel.setText(" " + currentSource.buttonLabel() + ": " + visible.size()
+                    + (query.isEmpty() ? "" : " (filtered from " + snapshot.size() + ")")
+                    + " request(s) \u2014 click Refresh to reload from Burp");
+        }
         updateCounts();
         if (!visible.isEmpty() && table.getSelectedRow() < 0) {
             table.setRowSelectionInterval(0, 0);
         } else if (visible.isEmpty()) {
             detailModel.setRecord(null);
-            notesArea.setText("");
-            String label = currentSource == Source.ALL ? null : currentSource.recordLabel();
-            int nonMatching = 0;
-            List<String> examples = new ArrayList<>();
-            for (MessageRecord record : host.allKnownRecords()) {
-                if (label == null || record.isFrom(label)) {
-                    if (matcher.match(record.url()).isEmpty()) {
-                        nonMatching++;
-                        if (examples.size() < 2) {
-                            examples.add(record.method() + " " + record.url());
-                        }
-                    }
-                }
+            setNotesEditor(null);
+            if (loadWorker == null || loadWorker.isDone()) {
+                summaryLabel.setText(" No " + currentSource.buttonLabel() + " requests match this endpoint.");
             }
-            StringBuilder msg = new StringBuilder(summaryLabel.getText())
-                    .append("  \u2014  no \"").append(currentSource.buttonLabel())
-                    .append("\" request matches this endpoint");
-            if (nonMatching > 0) {
-                msg.append(" (").append(nonMatching).append(" exist but don't match \u2014 e.g. ")
-                        .append(String.join(" | ", examples))
-                        .append(" \u2014 check the pattern/match mode)");
-            } else {
-                msg.append(" (nothing recorded in this source yet \u2014 recording starts when the extension loads)");
-            }
-            summaryLabel.setText(msg.toString());
         }
     }
 
     private void updateCounts() {
         StringBuilder sb = new StringBuilder(" Recorded \u2014 ");
         for (Source source : new Source[]{Source.REPEATER, Source.INTRUDER, Source.TARGET, Source.HISTORY}) {
-            sb.append(source.buttonLabel()).append(": ").append(host.collect(source, matcher).size()).append("   ");
+            int count = 0;
+            for (MessageRecord record : snapshot) {
+                if (record.isFrom(source.recordLabel())) {
+                    count++;
+                }
+            }
+            sb.append(source.buttonLabel()).append(": ").append(count).append("   ");
         }
         countsLabel.setText(sb.toString());
     }
@@ -300,8 +335,37 @@ public final class ResultsFrame extends JFrame {
         viewer.showMessage(record);
         viewer.setSearchExpression(searchField.getText().trim());
         detailModel.setRecord(record);
-        notesArea.setText(record.notes().isEmpty() ? "(no notes)" : record.notes());
+        setNotesEditor(record);
         notesArea.setCaretPosition(0);
+    }
+
+    private void setNotesEditor(MessageRecord record) {
+        saveNoteNow();
+        noteRecord = record;
+        loadingNote = true;
+        notesArea.setText(record == null ? "" : record.notes());
+        loadingNote = false;
+    }
+
+    private void noteChanged() {
+        if (!loadingNote && noteRecord != null) {
+            // Coalesce typing, but persist promptly enough for live sync.
+            noteSaveTimer.restart();
+        }
+    }
+
+    private final Timer noteSaveTimer = new Timer(700, e -> saveNoteNow());
+
+    private void saveNoteNow() {
+        noteSaveTimer.stop();
+        if (loadingNote || noteRecord == null) {
+            return;
+        }
+        String notes = notesArea.getText();
+        if (!notes.equals(noteRecord.notes())) {
+            host.updateNotes(noteRecord, notes);
+            noteRecord = noteRecord.withNotes(notes);
+        }
     }
 
     // ------------------------------------------------------------------

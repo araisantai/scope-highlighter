@@ -1,4 +1,4 @@
-package scopehighlighter.http;
+package scopemanager.http;
 
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.Annotations;
@@ -8,10 +8,10 @@ import burp.api.montoya.http.handler.HttpRequestToBeSent;
 import burp.api.montoya.http.handler.HttpResponseReceived;
 import burp.api.montoya.http.handler.RequestToBeSentAction;
 import burp.api.montoya.http.handler.ResponseReceivedAction;
-import scopehighlighter.log.MessageLog;
-import scopehighlighter.log.MessageRecord;
-import scopehighlighter.model.GroupStore;
-import scopehighlighter.model.ScopeGroup;
+import scopemanager.log.MessageLog;
+import scopemanager.log.MessageRecord;
+import scopemanager.model.GroupStore;
+import scopemanager.model.ScopeGroup;
 
 import java.util.Optional;
 
@@ -19,8 +19,8 @@ import java.util.Optional;
  * 1) Auto-highlights every request that flows through Burp (Proxy, Repeater,
  *    Scanner, ...) according to the matching scope group.
  * 2) Records every completed exchange into the {@link MessageLog} with its
- *    tool of origin and its notes (group title), so Repeater/Intruder requests
- *    can be replayed from the Scope Highlighter tab later (Burp keeps no
+ *    tool of origin and its user-owned note, so Repeater/Intruder requests
+ *    can be replayed from the Scope Manager tab later (Burp keeps no
  *    history API for those tools).
  * 3) Notifies a {@link Listener} for every recorded match (used for the
  *    automatic "notes to organizer" sync).
@@ -57,7 +57,7 @@ public final class HighlighterHandler implements HttpHandler {
             Annotations annotations = buildAnnotations(requestToBeSent.annotations(), match.get());
             return RequestToBeSentAction.continueWith(requestToBeSent, annotations);
         } catch (Exception e) {
-            log("Scope Highlighter: request handler error: " + e);
+            log("Scope Manager: request handler error: " + e);
             return RequestToBeSentAction.continueWith(requestToBeSent);
         }
     }
@@ -68,12 +68,12 @@ public final class HighlighterHandler implements HttpHandler {
         try {
             match = store.findMatch(responseReceived.initiatingRequest().url());
         } catch (Throwable e) {
-            log("Scope Highlighter: match error: " + e);
+            log("Scope Manager: match error: " + e);
         }
         try {
             record(responseReceived, match.map(GroupStore.Match::group).orElse(null));
         } catch (Throwable e) {
-            log("Scope Highlighter: record dispatch error: " + e);
+            log("Scope Manager: record dispatch error: " + e);
         }
         try {
             if (!store.isAutoHighlightEnabled()) {
@@ -85,7 +85,7 @@ public final class HighlighterHandler implements HttpHandler {
             Annotations annotations = buildAnnotations(responseReceived.annotations(), match.get());
             return ResponseReceivedAction.continueWith(responseReceived, annotations);
         } catch (Exception e) {
-            log("Scope Highlighter: response handler error: " + e);
+            log("Scope Manager: response handler error: " + e);
             return ResponseReceivedAction.continueWith(responseReceived);
         }
     }
@@ -95,9 +95,8 @@ public final class HighlighterHandler implements HttpHandler {
             String source = sourceLabel(responseReceived.toolSource().toolType());
             String requestRaw = MessageLog.clampRaw(responseReceived.initiatingRequest().toString());
             String responseRaw = MessageLog.clampRaw(responseReceived.toString());
-            String notes = match != null
-                    ? match.name()
-                    : (responseReceived.annotations().hasNotes() ? responseReceived.annotations().notes() : "");
+            String notes = responseReceived.annotations().hasNotes()
+                    ? responseReceived.annotations().notes() : "";
             MessageRecord record = new MessageRecord(
                     System.currentTimeMillis(),
                     source,
@@ -114,7 +113,7 @@ public final class HighlighterHandler implements HttpHandler {
                 listener.onRecorded(record, match);
             }
         } catch (Throwable e) {
-            log("Scope Highlighter: record error: " + e);
+            log("Scope Manager: record error: " + e);
         }
     }
 
@@ -140,11 +139,7 @@ public final class HighlighterHandler implements HttpHandler {
     }
 
     private Annotations buildAnnotations(Annotations current, GroupStore.Match match) {
-        Annotations updated = current.withHighlightColor(match.group().color());
-        if (store.isWriteNotesEnabled() && !current.hasNotes()) {
-            updated = updated.withNotes(match.group().name());
-        }
-        return updated;
+        return current.withHighlightColor(match.group().color());
     }
 
     private void log(String message) {

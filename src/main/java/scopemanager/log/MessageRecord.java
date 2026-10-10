@@ -1,4 +1,4 @@
-package scopehighlighter.log;
+package scopemanager.log;
 
 /**
  * One recorded HTTP exchange, independent of Burp's own (volatile) tool
@@ -78,6 +78,12 @@ public final class MessageRecord {
 
     public String notes() {
         return notes;
+    }
+
+    /** Copy this immutable record with an updated user note. */
+    public MessageRecord withNotes(String updatedNotes) {
+        return new MessageRecord(timestamp, source, method, url, status,
+                requestLength, responseLength, requestRaw, responseRaw, updatedNotes);
     }
 
     public boolean isFrom(String sourceLabel) {

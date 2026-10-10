@@ -1,15 +1,15 @@
-package scopehighlighter;
+package scopemanager;
 
 import burp.api.montoya.core.HighlightColor;
-import scopehighlighter.log.MessageLog;
-import scopehighlighter.log.MessageRecord;
-import scopehighlighter.model.GroupStore;
-import scopehighlighter.model.MatchMode;
-import scopehighlighter.model.ScopeGroup;
-import scopehighlighter.ui.GroupDialog;
-import scopehighlighter.ui.ResultsFrame;
-import scopehighlighter.ui.ScopeHighlighterTab;
-import scopehighlighter.util.EndpointParser;
+import scopemanager.log.MessageLog;
+import scopemanager.log.MessageRecord;
+import scopemanager.model.GroupStore;
+import scopemanager.model.MatchMode;
+import scopemanager.model.ScopeGroup;
+import scopemanager.ui.GroupDialog;
+import scopemanager.ui.ResultsFrame;
+import scopemanager.ui.ScopeManagerTab;
+import scopemanager.util.EndpointParser;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -76,6 +76,10 @@ public final class SelfTest {
 
         // nothing to parse
         check("parser: empty input", EndpointParser.parse("").isEmpty());
+
+        check("parser: URL placeholders remain intact",
+                EndpointParser.parse("https://example.com/pending-orders/{{order_id}}?transaction_id={{randomtrxid}}&channel=b0")
+                        .equals(List.of("https://example.com/pending-orders/{{order_id}}?transaction_id={{randomtrxid}}&channel=b0")));
     }
 
     private static void matcherTests() {
@@ -94,6 +98,45 @@ public final class SelfTest {
                 prefix.match("https://ADMIN.Site.com/Career").isPresent());
         check("match: prefix negative",
                 prefix.match("https://admin.site.com/other").isEmpty());
+
+        String orderUrl = "https://example.com/pending-orders/12345?transaction_id=abc987&channel=b0";
+        ScopeGroup doubleBraces = new ScopeGroup("orders", HighlightColor.RED, MatchMode.PREFIX, true,
+                List.of("https://example.com/pending-orders/{{order_id}}?transaction_id={{randomtrxid}}&channel=b0"));
+        ScopeGroup singleBraces = new ScopeGroup("orders", HighlightColor.RED, MatchMode.PREFIX, true,
+                List.of("https://example.com/pending-orders/{order_id}?transaction_id={randomtrxid}&channel=b0"));
+        check("match: double-brace path and query placeholders", doubleBraces.match(orderUrl).isPresent());
+        check("match: single-brace path and query placeholders", singleBraces.match(orderUrl).isPresent());
+        check("match: queryless request matches single-brace endpoint template",
+                singleBraces.match("https://example.com/pending-orders/123455").isPresent());
+        check("match: another queryless ID matches the same template",
+                singleBraces.match("https://example.com/pending-orders/289390").isPresent());
+        check("match: queryless request matches double-brace endpoint template",
+                doubleBraces.match("https://example.com/pending-orders/289390").isPresent());
+        check("match: arbitrary placeholder label is supported",
+                new ScopeGroup("orders", HighlightColor.RED, MatchMode.PREFIX, true,
+                        List.of("/pending-orders/{order_ids}"))
+                        .match("https://example.com/pending-orders/123455").isPresent());
+        check("match: queryless template does not include another route",
+                singleBraces.match("https://example.com/pending-orders/123455/items").isEmpty());
+        check("match: placeholder template stays on its host",
+                singleBraces.match("https://other.example.com/pending-orders/123455").isEmpty());
+        GroupStore orderStore = new GroupStore();
+        orderStore.addGroup(singleBraces);
+        check("match: queryless placeholder request is in scope group",
+                orderStore.findMatch("https://example.com/pending-orders/123455").isPresent());
+        check("match: placeholder value must not be empty",
+                doubleBraces.match("https://example.com/pending-orders/?transaction_id=abc987&channel=b0").isEmpty());
+        check("match: path placeholder stays within one segment",
+                doubleBraces.match("https://example.com/pending-orders/123/extra?transaction_id=abc987&channel=b0").isEmpty());
+        check("match: query placeholder stays within one value",
+                doubleBraces.match("https://example.com/pending-orders/123?transaction_id=abc&other=1&channel=b0").isEmpty());
+        check("match: literal query part remains fixed",
+                doubleBraces.match("https://example.com/pending-orders/123?transaction_id=abc987&channel=b1").isEmpty());
+
+        singleBraces.setPatterns(List.of("/new-orders/{order_id}"));
+        check("match: editing group recompiles placeholders",
+                singleBraces.match("https://example.com/new-orders/456").isPresent()
+                && singleBraces.match(orderUrl).isEmpty());
 
         ScopeGroup contains = new ScopeGroup("g", HighlightColor.BLUE, MatchMode.CONTAINS, true,
                 List.of("verify-location"));
@@ -248,12 +291,15 @@ public final class SelfTest {
         notedBack.loadFromBlob(noted.toBlob());
         check("log: notes survive persistence",
                 notedBack.size() == 1 && "Hiring Stage".equals(notedBack.entries().get(0).notes()));
+        check("log: note updates propagate by request identity",
+                notedBack.updateNotes(notedBack.entries().get(0).key(), "edited") == 1
+                        && "edited".equals(notedBack.entries().get(0).notes()));
 
         // truncation marker
         String huge = "x".repeat(MessageLog.MAX_RAW_CHARS + 100);
         String clamped = MessageLog.clampRaw(huge);
         check("log: oversized raw clamped", clamped.length() < huge.length()
-                && clamped.endsWith("...[truncated by Scope Highlighter]"));
+                && clamped.endsWith("...[truncated by Scope Manager]"));
 
         // FIFO cap
         MessageLog big = new MessageLog();
@@ -265,43 +311,39 @@ public final class SelfTest {
     }
 
     private static void actionRoutingTests() {
-        // two equal buttons per cell: 2px inset + 3px gap
-        for (int width : new int[]{200, 333, 360, 500}) {
-            int count = ScopeHighlighterTab.ACTIONS.length;
-            int gap = 3;
-            int inset = 2;
-            int buttonWidth = (width - 2 * inset - (count - 1) * gap) / count;
-            boolean all = true;
-            for (int i = 0; i < count; i++) {
-                int center = inset + i * (buttonWidth + gap) + buttonWidth / 2;
-                if (ScopeHighlighterTab.actionIndexForCellX(center, width) != i) {
-                    all = false;
-                }
-            }
-            check("actions: all buttons routable at width " + width, all);
-        }
-        int count = ScopeHighlighterTab.ACTIONS.length;
-        check("actions: first button left edge", ScopeHighlighterTab.actionIndexForCellX(2, 360) == 0);
-        check("actions: last button right edge",
-                ScopeHighlighterTab.actionIndexForCellX(357, 360) == count - 1);
-        // gap between the two buttons maps to the nearer one
-        int buttonWidth = (360 - 4 - 3) / count;
-        int justLeftOfSecond = 2 + (buttonWidth + 3) - 1;
-        check("actions: gap maps to nearest button",
-                ScopeHighlighterTab.actionIndexForCellX(justLeftOfSecond, 360) == 1);
+        java.awt.Component eventSource = new javax.swing.JPanel();
+        java.awt.event.MouseEvent leftPopup = new java.awt.event.MouseEvent(eventSource,
+                java.awt.event.MouseEvent.MOUSE_RELEASED, 0, 0, 5, 5, 1, true,
+                java.awt.event.MouseEvent.BUTTON1);
+        java.awt.event.MouseEvent rightPopup = new java.awt.event.MouseEvent(eventSource,
+                java.awt.event.MouseEvent.MOUSE_RELEASED, 0, 0, 5, 5, 1, true,
+                java.awt.event.MouseEvent.BUTTON3);
+        check("actions: left click never opens endpoint menu",
+                !ScopeManagerTab.isSecondaryPopup(leftPopup));
+        check("actions: secondary click opens endpoint menu",
+                ScopeManagerTab.isSecondaryPopup(rightPopup));
+
     }
 
     private static void organizerSyncTests() {
-        scopehighlighter.organizer.OrganizerSync sync = new scopehighlighter.organizer.OrganizerSync();
+        scopemanager.organizer.OrganizerSync sync = new scopemanager.organizer.OrganizerSync();
         check("organizer: first send goes through", sync.markSent("GET /a 200 1/2"));
         check("organizer: duplicate suppressed", !sync.markSent("GET /a 200 1/2"));
         check("organizer: second key goes through", sync.markSent("GET /b 200 1/2"));
         check("organizer: tracks size", sync.size() == 2);
 
-        scopehighlighter.organizer.OrganizerSync restored = new scopehighlighter.organizer.OrganizerSync();
+        scopemanager.organizer.OrganizerSync restored = new scopemanager.organizer.OrganizerSync();
         restored.loadFromBlob(sync.toBlob());
         check("organizer: dedupe state survives restore",
                 !restored.markSent("GET /a 200 1/2") && restored.size() == 2);
+
+        String multilineNoteKey = scopemanager.organizer.OrganizerSync.keyFor("GET /a", "one\ntwo");
+        check("organizer: note key is single-line", !multilineNoteKey.contains("\n"));
+        check("organizer: changed note gets a new key",
+                !multilineNoteKey.equals(scopemanager.organizer.OrganizerSync.keyFor("GET /a", "one\nthree")));
+        sync.markSent(multilineNoteKey);
+        restored.loadFromBlob(sync.toBlob());
+        check("organizer: multiline note dedupe survives restore", restored.alreadySent(multilineNoteKey));
     }
 
     private static void detailModelTests() {
@@ -347,17 +389,26 @@ public final class SelfTest {
         ScopeGroup matcher = new ScopeGroup("g", HighlightColor.RED, MatchMode.PREFIX, true,
                 List.of("https://a.com/x"));
         check("sources: canonical order (repeater, intruder, target)",
-                ScopeHighlighterTab.describeSources(matcher, records).equals("Repeater, Intruder, Target"));
+                ScopeManagerTab.describeSources(matcher, records).equals("Repeater, Intruder, Target"));
 
         ScopeGroup broad = new ScopeGroup("g", HighlightColor.RED, MatchMode.PREFIX, true,
                 List.of("https://a.com"));
         check("sources: all four in order",
-                ScopeHighlighterTab.describeSources(broad, records).equals("Repeater, Intruder, History, Target"));
+                ScopeManagerTab.describeSources(broad, records).equals("Repeater, Intruder, History, Target"));
 
         ScopeGroup none = new ScopeGroup("g", HighlightColor.RED, MatchMode.PREFIX, true,
                 List.of("https://nomatch/"));
         check("sources: dash when nothing matches",
-                ScopeHighlighterTab.describeSources(none, records).equals("\u2014"));
+                ScopeManagerTab.describeSources(none, records).equals("\u2014"));
+
+        records.add(new MessageRecord(5, "Repeater", "POST", "https://a.com/x/note", 200,
+                2, 2, "rq", "rs", "keep this"));
+        records.add(new MessageRecord(6, "Target", "POST", "https://a.com/x/note", 200,
+                2, 2, "rq", "rs", "keep this"));
+        check("total count: distinct requests across sources",
+                ScopeManagerTab.countTotalRequests(matcher, records) == 4);
+        check("notes count: only non-empty distinct requests",
+                ScopeManagerTab.countNotedRequests(matcher, records) == 1);
     }
 
     private static void tabSmokeTest() {
@@ -367,12 +418,26 @@ public final class SelfTest {
             store.addGroup(new ScopeGroup("admin career page", HighlightColor.RED, MatchMode.PREFIX, true,
                     List.of("https://admin.site.com/career", "/admin/verify-location")));
 
-            ScopeHighlighterTab tab = new ScopeHighlighterTab(store, new HostStub());
+            ScopeManagerTab tab = new ScopeManagerTab(store, new HostStub());
 
             check("ui: tab constructs headless", tab != null && tab.getComponentCount() == 3);
             javax.swing.JTable table = findTable(tab);
             check("ui: grid has group + endpoint rows", table != null && table.getRowCount() == 3);
-            check("ui: grid has action column", table != null && table.getColumnCount() == 6);
+            check("ui: grid has total and notes counts without action column",
+                    table != null && table.getColumnCount() == 7
+                    && "Total request".equals(table.getColumnName(5))
+                    && "With Notes".equals(table.getColumnName(6)));
+            java.awt.Component toolbar = tab.getComponent(0);
+            List<String> buttonLabels = new ArrayList<>();
+            if (toolbar instanceof javax.swing.JPanel) {
+                for (java.awt.Component child : ((javax.swing.JPanel) toolbar).getComponents()) {
+                    if (child instanceof javax.swing.JButton) {
+                        buttonLabels.add(((javax.swing.JButton) child).getText());
+                    }
+                }
+            }
+            check("ui: global Push Organizer follows Refresh Notes",
+                    buttonLabels.indexOf("Push Organizer") == buttonLabels.indexOf("Refresh Notes") + 1);
             check("ui: group row title+count", "admin career page  (2 endpoints)".equals(table.getValueAt(0, 1)));
             check("ui: endpoint rows listed like excel",
                     "https://admin.site.com/career".equals(table.getValueAt(1, 1))
@@ -412,7 +477,7 @@ public final class SelfTest {
 
     // ------------------------------------------------------------------
 
-    private static final class HostStub implements scopehighlighter.ui.Host {
+    private static final class HostStub implements scopemanager.ui.Host {
         @Override
         public java.awt.Component applyTheme(java.awt.Component component) {
             return component;
@@ -423,7 +488,7 @@ public final class SelfTest {
         }
 
         @Override
-        public List<MessageRecord> collect(scopehighlighter.log.Source source, ScopeGroup matcher) {
+        public List<MessageRecord> collect(scopemanager.log.Source source, ScopeGroup matcher) {
             return new ArrayList<>();
         }
 
@@ -449,7 +514,16 @@ public final class SelfTest {
         }
 
         @Override
+        public void updateNotes(MessageRecord record, String notes) {
+        }
+
+        @Override
         public int syncToOrganizer(ScopeGroup matcher) {
+            return 0;
+        }
+
+        @Override
+        public int syncAllToOrganizer() {
             return 0;
         }
 
@@ -458,8 +532,8 @@ public final class SelfTest {
         }
 
         @Override
-        public scopehighlighter.ui.MessageViewer createMessageViewer() {
-            return scopehighlighter.ui.BurpMessageViewer.textOnly();
+        public scopemanager.ui.MessageViewer createMessageViewer() {
+            return scopemanager.ui.BurpMessageViewer.textOnly();
         }
 
         @Override

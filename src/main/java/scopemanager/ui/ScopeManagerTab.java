@@ -1,9 +1,9 @@
-package scopehighlighter.ui;
+package scopemanager.ui;
 
-import scopehighlighter.log.MessageRecord;
-import scopehighlighter.log.Source;
-import scopehighlighter.model.GroupStore;
-import scopehighlighter.model.ScopeGroup;
+import scopemanager.log.MessageRecord;
+import scopemanager.log.Source;
+import scopemanager.model.GroupStore;
+import scopemanager.model.ScopeGroup;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -17,6 +17,7 @@ import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
 import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
 import java.awt.BorderLayout;
@@ -24,12 +25,6 @@ import java.awt.Color;
 import java.awt.Component;
 import java.awt.FlowLayout;
 import java.awt.Font;
-import java.awt.GradientPaint;
-import java.awt.Graphics;
-import java.awt.Graphics2D;
-import java.awt.Insets;
-import java.awt.Rectangle;
-import java.awt.RenderingHints;
 import java.awt.Window;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -37,12 +32,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The "Scope Highlighter" suite tab.
+ * The "Scope Manager" suite tab.
  *
  * Excel-like grid: one bold group row per group and below it one row per
- * endpoint, columns: #, Endpoint / Group, Color, Match, Action. The Action
- * column has three colorized buttons: copy endpoint | show all |
- * notes to organizer - with hover and pressed feedback.
+ * endpoint, columns: #, Endpoint / Group, Color, Match, Sources, Total request, With Notes.
  *
  * Mouse behaviour (Burp-like):
  *   left click           -> select row
@@ -51,37 +44,17 @@ import java.util.List;
  *   right-click endpoint -> context menu (Send to Repeater / Intruder /
  *                           Organizer, Copy endpoint, Show all)
  */
-public final class ScopeHighlighterTab extends JPanel {
-
-    /** The two Action-column buttons (plain, no color). */
-    public enum RowAction {
-        SHOW_ALL("Show Requests"),
-        TO_ORGANIZER("Push Organizer Notes");
-
-        private final String label;
-
-        RowAction(String label) {
-            this.label = label;
-        }
-
-        public String label() {
-            return label;
-        }
-    }
-
-    public static final RowAction[] ACTIONS = RowAction.values();
-
-    /** Column index of the Action buttons. */
-    public static final int ACTION_COLUMN = 5;
+public final class ScopeManagerTab extends JPanel {
 
     private final GroupStore store;
     private final Host host;
     private final OutlineTableModel model;
     private final JTable table;
     private final JLabel statusLabel = new JLabel(" ");
-    private final ActionButtonsPanel actionPanel = new ActionButtonsPanel();
+    private final java.util.concurrent.atomic.AtomicBoolean recomputeRunning =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
-    public ScopeHighlighterTab(GroupStore store, Host host) {
+    public ScopeManagerTab(GroupStore store, Host host) {
         super(new BorderLayout(8, 8));
         this.store = store;
         this.host = host;
@@ -96,10 +69,6 @@ public final class ScopeHighlighterTab extends JPanel {
         refreshAll();
         host.applyTheme(this);
 
-        // keep the Sources column fresh as traffic flows
-        javax.swing.Timer sourcesTimer = new javax.swing.Timer(15000, e -> recomputeSources());
-        sourcesTimer.setRepeats(true);
-        sourcesTimer.start();
     }
 
     /** Rebuilds the grid and status line (also called by the store change listener). */
@@ -111,16 +80,64 @@ public final class ScopeHighlighterTab extends JPanel {
 
     /** Fills the "Sources" column: which Burp sources hold data per row. */
     private void recomputeSources() {
-        try {
-            List<MessageRecord> records = host.allKnownRecords();
-            List<String> labels = new ArrayList<>();
-            for (int i = 0; i < model.getRowCount(); i++) {
-                labels.add(describeSources(matcherFor(model.rowAt(i)), records));
-            }
-            model.setSourceLabels(labels);
-        } catch (Exception e) {
-            host.log("Scope Highlighter: sources recompute failed: " + e);
+        if (!recomputeRunning.compareAndSet(false, true)) {
+            return;
         }
+        List<ScopeGroup> matchers = new ArrayList<>();
+        for (int i = 0; i < model.getRowCount(); i++) {
+            matchers.add(matcherFor(model.rowAt(i)));
+        }
+        Thread worker = new Thread(() -> {
+            try {
+                List<MessageRecord> records = host.allKnownRecords();
+                List<String> labels = new ArrayList<>();
+                List<Integer> totalCounts = new ArrayList<>();
+                List<Integer> noteCounts = new ArrayList<>();
+                for (ScopeGroup matcher : matchers) {
+                    labels.add(describeSources(matcher, records));
+                    RequestCounts counts = countRequests(matcher, records);
+                    totalCounts.add(counts.total());
+                    noteCounts.add(counts.noted());
+                }
+                SwingUtilities.invokeLater(() -> {
+                    if (model.getRowCount() == matchers.size()) {
+                        model.setSourceLabels(labels);
+                        model.setTotalCounts(totalCounts);
+                        model.setNoteCounts(noteCounts);
+                    }
+                });
+            } catch (Exception e) {
+                host.log("Scope Manager: sources recompute failed: " + e);
+            } finally {
+                recomputeRunning.set(false);
+            }
+        }, "scope-manager-metadata");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private record RequestCounts(int total, int noted) {}
+
+    private static RequestCounts countRequests(ScopeGroup matcher, List<MessageRecord> records) {
+        java.util.Set<String> allKeys = new java.util.HashSet<>();
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        for (MessageRecord record : records) {
+            if (matcher.match(record.url()).isPresent()) {
+                allKeys.add(record.key());
+                if (!record.notes().isBlank()) {
+                    keys.add(record.key());
+                }
+            }
+        }
+        return new RequestCounts(allKeys.size(), keys.size());
+    }
+
+    public static int countTotalRequests(ScopeGroup matcher, List<MessageRecord> records) {
+        return countRequests(matcher, records).total();
+    }
+
+    public static int countNotedRequests(ScopeGroup matcher, List<MessageRecord> records) {
+        return countRequests(matcher, records).noted();
     }
 
     /**
@@ -160,38 +177,29 @@ public final class ScopeHighlighterTab extends JPanel {
         JButton delete = new JButton("Delete");
         JButton up = new JButton("\u2191");
         JButton down = new JButton("\u2193");
+        JButton refresh = new JButton("Refresh Notes");
+        JButton pushNotes = new JButton("Push Organizer");
 
         add.setToolTipText("Create a new scope group (title, color, endpoint list pasted from Excel)");
         edit.setToolTipText("Edit the group of the selected row (title, color, endpoint list)");
         delete.setToolTipText("Delete the selected group, or remove the selected endpoint from its group");
         up.setToolTipText("Move selected group up (higher match priority)");
         down.setToolTipText("Move selected group down (lower match priority)");
+        refresh.setToolTipText("Reload Sources, Total request, and With Notes counts from Burp");
+        pushNotes.setToolTipText("Send noted requests in all scope groups to Organizer Inbox");
 
         JCheckBox autoHighlight = new JCheckBox("Auto-highlight new traffic", store.isAutoHighlightEnabled());
-        JCheckBox writeNotes = new JCheckBox("Write group name to Notes", store.isWriteNotesEnabled());
-        JCheckBox autoOrganizer = new JCheckBox("Auto-add to Organizer", store.isAutoOrganizerEnabled());
         autoHighlight.setToolTipText("Every request flowing through Burp gets highlighted automatically");
-        writeNotes.setToolTipText("Also write the group title into the Notes column (only when the note is empty)");
-        autoOrganizer.setToolTipText(
-                "<html>Every request matching a group is automatically sent to Burp's Organizer,<br>"
-                        + "noted with the group title and highlighted in the group color.<br>"
-                        + "The Montoya API cannot create Organizer collections - use the note to group them.</html>");
 
         add.addActionListener(e -> onAdd());
         edit.addActionListener(e -> onEdit());
         delete.addActionListener(e -> onDelete());
         up.addActionListener(e -> onMove(-1));
         down.addActionListener(e -> onMove(1));
+        refresh.addActionListener(e -> recomputeSources());
+        pushNotes.addActionListener(e -> pushAllNotes(pushNotes));
         autoHighlight.addActionListener(e -> {
             store.setAutoHighlightEnabled(autoHighlight.isSelected());
-            refreshAll();
-        });
-        writeNotes.addActionListener(e -> {
-            store.setWriteNotesEnabled(writeNotes.isSelected());
-            refreshAll();
-        });
-        autoOrganizer.addActionListener(e -> {
-            store.setAutoOrganizerEnabled(autoOrganizer.isSelected());
             refreshAll();
         });
 
@@ -200,15 +208,15 @@ public final class ScopeHighlighterTab extends JPanel {
         toolbar.add(delete);
         toolbar.add(up);
         toolbar.add(down);
+        toolbar.add(refresh);
+        toolbar.add(pushNotes);
         toolbar.add(new JLabel("   "));
         toolbar.add(autoHighlight);
-        toolbar.add(writeNotes);
-        toolbar.add(autoOrganizer);
         return toolbar;
     }
 
     // ------------------------------------------------------------------
-    // table + action buttons
+    // table
     // ------------------------------------------------------------------
 
     private JScrollPane buildTable() {
@@ -221,53 +229,17 @@ public final class ScopeHighlighterTab extends JPanel {
         table.getColumnModel().getColumn(2).setPreferredWidth(110);
         table.getColumnModel().getColumn(3).setPreferredWidth(90);
         table.getColumnModel().getColumn(4).setPreferredWidth(180);
-        table.getColumnModel().getColumn(5).setPreferredWidth(360);
+        table.getColumnModel().getColumn(5).setPreferredWidth(100);
+        table.getColumnModel().getColumn(6).setPreferredWidth(90);
 
         table.getColumnModel().getColumn(1).setCellRenderer(new TextCellRenderer());
         table.getColumnModel().getColumn(2).setCellRenderer(new ColorCellRenderer());
-        table.getColumnModel().getColumn(5).setCellRenderer((tbl, value, isSelected, hasFocus, row, column) -> actionPanel);
-
-        table.addMouseMotionListener(new MouseAdapter() {
-            @Override
-            public void mouseMoved(MouseEvent e) {
-                updateHover(e);
-            }
-        });
 
         table.addMouseListener(new MouseAdapter() {
             @Override
-            public void mousePressed(MouseEvent e) {
-                int viewRow = table.rowAtPoint(e.getPoint());
-                int viewCol = table.columnAtPoint(e.getPoint());
-                if (viewRow < 0) {
-                    return;
-                }
-                if (viewCol == ACTION_COLUMN && e.getButton() == MouseEvent.BUTTON1) {
-                    int idx = actionIndexFor(e, viewRow);
-                    actionPanel.setPressed(idx);
-                    repaintActionCell(viewRow);
-                }
-            }
-
-            @Override
-            public void mouseReleased(MouseEvent e) {
-                int viewRow = table.rowAtPoint(e.getPoint());
-                int viewCol = table.columnAtPoint(e.getPoint());
-                int pressed = actionPanel.pressedIndex();
-                actionPanel.setPressed(-1);
-                if (viewRow >= 0 && viewCol == ACTION_COLUMN && e.getButton() == MouseEvent.BUTTON1) {
-                    repaintActionCell(viewRow);
-                    if (pressed >= 0 && pressed == actionIndexFor(e, viewRow)) {
-                        fireRowAction(viewRow, pressed);
-                    }
-                }
-            }
-
-            @Override
             public void mouseClicked(MouseEvent e) {
                 int viewRow = table.rowAtPoint(e.getPoint());
-                int viewCol = table.columnAtPoint(e.getPoint());
-                if (viewRow < 0 || viewCol == ACTION_COLUMN) {
+                if (viewRow < 0 || e.getButton() != MouseEvent.BUTTON1) {
                     return;
                 }
                 OutlineRow row = model.rowAt(table.convertRowIndexToModel(viewRow));
@@ -275,28 +247,17 @@ public final class ScopeHighlighterTab extends JPanel {
                     return;
                 }
                 if (e.getClickCount() == 2) {
-                    cancelPendingPopup();
                     if (row.isGroupRow()) {
                         onEdit();                      // double-click group -> edit scope group
                     } else {
                         openResults(row, Source.ALL);  // double-click endpoint -> show all
                     }
-                } else if (e.getClickCount() == 1 && !row.isGroupRow()) {
-                    // Burp-style options on left click, deferred slightly so a
-                    // double-click still triggers "show all" instead
-                    queuePopup(row, e);
                 }
             }
 
-            @Override
-            public void mouseExited(MouseEvent e) {
-                actionPanel.setHover(-1);
-                actionPanel.setPressed(-1);
-                table.repaint();
-            }
         });
 
-        // right-click also opens the menu immediately (standard Burp behaviour)
+        // Right-click opens the endpoint menu immediately.
         table.addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
@@ -309,17 +270,15 @@ public final class ScopeHighlighterTab extends JPanel {
             }
 
             private void maybePopup(MouseEvent e) {
-                if (!e.isPopupTrigger()) {
+                if (!isSecondaryPopup(e)) {
                     return;
                 }
                 int viewRow = table.rowAtPoint(e.getPoint());
-                int viewCol = table.columnAtPoint(e.getPoint());
-                if (viewRow < 0 || viewCol == ACTION_COLUMN) {
+                if (viewRow < 0) {
                     return;
                 }
                 OutlineRow row = model.rowAt(table.convertRowIndexToModel(viewRow));
                 if (row != null && !row.isGroupRow()) {
-                    cancelPendingPopup();
                     table.setRowSelectionInterval(viewRow, viewRow);
                     showContextMenu(row, e);
                 }
@@ -328,195 +287,15 @@ public final class ScopeHighlighterTab extends JPanel {
         return new JScrollPane(table);
     }
 
-    // single-click / double-click disambiguation for endpoint rows
-    private javax.swing.Timer clickTimer;
-    private OutlineRow pendingPopupRow;
-    private MouseEvent pendingPopupEvent;
-
-    private void queuePopup(OutlineRow row, MouseEvent e) {
-        cancelPendingPopup();
-        pendingPopupRow = row;
-        pendingPopupEvent = e;
-        if (clickTimer == null) {
-            clickTimer = new javax.swing.Timer(280, ev -> firePendingPopup());
-            clickTimer.setRepeats(false);
-        }
-        clickTimer.restart();
-    }
-
-    private void cancelPendingPopup() {
-        if (clickTimer != null) {
-            clickTimer.stop();
-        }
-        pendingPopupRow = null;
-        pendingPopupEvent = null;
-    }
-
-    private void firePendingPopup() {
-        if (pendingPopupRow != null && pendingPopupEvent != null) {
-            showContextMenu(pendingPopupRow, pendingPopupEvent);
-        }
-        pendingPopupRow = null;
-        pendingPopupEvent = null;
-    }
-
-    private void updateHover(MouseEvent e) {
-        int viewRow = table.rowAtPoint(e.getPoint());
-        int viewCol = table.columnAtPoint(e.getPoint());
-        int idx = -1;
-        if (viewRow >= 0 && viewCol == 4) {
-            idx = actionIndexFor(e, viewRow);
-        }
-        if (idx != actionPanel.hoverIndex()) {
-            actionPanel.setHover(idx);
-            if (viewRow >= 0) {
-                repaintActionCell(viewRow);
-            } else {
-                table.repaint();
-            }
-        }
-    }
-
-    private int actionIndexFor(MouseEvent e, int viewRow) {
-        Rectangle cell = table.getCellRect(viewRow, ACTION_COLUMN, false);
-        if (cell == null || cell.width <= 0) {
-            return -1;
-        }
-        return actionIndexForCellX(e.getX() - cell.x, cell.width);
-    }
-
-    private void repaintActionCell(int viewRow) {
-        Rectangle cell = table.getCellRect(viewRow, ACTION_COLUMN, false);
-        if (cell != null) {
-            table.repaint(cell.x, cell.y - 2, cell.width + 2, cell.height + 4);
-        }
-    }
-
-    private void fireRowAction(int viewRow, int actionIndex) {
-        OutlineRow row = model.rowAt(table.convertRowIndexToModel(viewRow));
-        if (row == null) {
-            return;
-        }
-        switch (ACTIONS[actionIndex]) {
-            case SHOW_ALL:
-                openResults(row, Source.ALL);
-                break;
-            case TO_ORGANIZER:
-                onNotesToOrganizer(row);
-                break;
-            default:
-                break;
-        }
-    }
-
-    /**
-     * Mirrors {@link ActionButtonsPanel}'s geometry (2px inset, 3px gaps,
-     * equal widths) so clicks map to the painted buttons exactly.
-     */
-    public static int actionIndexForCellX(int x, int cellWidth) {
-        int count = ACTIONS.length;
-        int gap = 3;
-        int inset = 2;
-        int buttonWidth = (cellWidth - 2 * inset - (count - 1) * gap) / count;
-        if (buttonWidth <= 0) {
-            return 0;
-        }
-        int best = 0;
-        int bestDistance = Integer.MAX_VALUE;
-        for (int i = 0; i < count; i++) {
-            int x0 = inset + i * (buttonWidth + gap);
-            int x1 = x0 + buttonWidth;
-            if (x >= x0 && x < x1) {
-                return i;
-            }
-            int distance = x < x0 ? x0 - x : x - x1;
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                best = i;
-            }
-        }
-        return best;
-    }
-
-    /** Painted, colorized action buttons with hover/pressed feedback. */
-    static final class ActionButtonsPanel extends JPanel {
-        private int hoverIndex = -1;
-        private int pressedIndex = -1;
-
-        ActionButtonsPanel() {
-            setOpaque(false);
-        }
-
-        void setHover(int index) {
-            this.hoverIndex = index;
-        }
-
-        void setPressed(int index) {
-            this.pressedIndex = index;
-        }
-
-        int hoverIndex() {
-            return hoverIndex;
-        }
-
-        int pressedIndex() {
-            return pressedIndex;
-        }
-
-        // plain "square rounded" button style (no color)
-        private static final int RADIUS = 4;
-        private static final Color BASE_TOP = new Color(0xF7, 0xF7, 0xF7);
-        private static final Color BASE_BOTTOM = new Color(0xE8, 0xE8, 0xE8);
-        private static final Color HOVER_TOP = new Color(0xFF, 0xFF, 0xFF);
-        private static final Color HOVER_BOTTOM = new Color(0xEF, 0xEF, 0xEF);
-        private static final Color PRESSED_TOP = new Color(0xD8, 0xD8, 0xD8);
-        private static final Color PRESSED_BOTTOM = new Color(0xE2, 0xE2, 0xE2);
-        private static final Color BORDER = new Color(0xC4, 0xC4, 0xC4);
-        private static final Color BORDER_HOVER = new Color(0x9E, 0x9E, 0x9E);
-        private static final Color TEXT = new Color(0x3C, 0x3C, 0x3C);
-
-        @Override
-        protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            Graphics2D g2 = (Graphics2D) g.create();
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-            int width = getWidth();
-            int height = getHeight();
-            int count = ACTIONS.length;
-            int gap = 3;
-            int inset = 2;
-            int buttonWidth = (width - 2 * inset - (count - 1) * gap) / count;
-            Font font = getFont().deriveFont(Font.PLAIN, 11f);
-            g2.setFont(font);
-            for (int i = 0; i < count; i++) {
-                int x = inset + i * (buttonWidth + gap);
-                int y = 1;
-                int h = height - 2;
-                boolean pressed = i == pressedIndex;
-                boolean hover = i == hoverIndex && !pressed;
-
-                Color top = pressed ? PRESSED_TOP : hover ? HOVER_TOP : BASE_TOP;
-                Color bottom = pressed ? PRESSED_BOTTOM : hover ? HOVER_BOTTOM : BASE_BOTTOM;
-                g2.setPaint(new GradientPaint(x, y, top, x, y + h, bottom));
-                g2.fillRoundRect(x, y + (pressed ? 1 : 0), buttonWidth, h - (pressed ? 1 : 0), RADIUS, RADIUS);
-
-                g2.setColor(hover || pressed ? BORDER_HOVER : BORDER);
-                g2.drawRoundRect(x, y + (pressed ? 1 : 0), buttonWidth, h - (pressed ? 1 : 0), RADIUS, RADIUS);
-
-                String text = ACTIONS[i].label();
-                int textWidth = g2.getFontMetrics().stringWidth(text);
-                int textX = x + Math.max(2, (buttonWidth - textWidth) / 2);
-                int textY = y + (h + g2.getFontMetrics().getAscent() - g2.getFontMetrics().getDescent()) / 2 + (pressed ? 1 : 0);
-                g2.setColor(TEXT);
-                g2.drawString(text, textX, textY);
-            }
-            g2.dispose();
-        }
+    /** A normal left click must never open the endpoint menu, even if a
+     *  platform reports it as a popup trigger. Trackpad secondary taps use
+     *  button 3 in Java, just like a mouse right click. */
+    public static boolean isSecondaryPopup(MouseEvent event) {
+        return event.getButton() == MouseEvent.BUTTON3 && event.isPopupTrigger();
     }
 
     // ------------------------------------------------------------------
-    // row actions
+    // request actions
     // ------------------------------------------------------------------
 
     private ScopeGroup matcherFor(OutlineRow row) {
@@ -543,11 +322,39 @@ public final class ScopeHighlighterTab extends JPanel {
     }
 
     private void onNotesToOrganizer(OutlineRow row) {
-        statusLabel.setText(" sending to Organizer\u2026");
-        int sent = host.syncToOrganizer(matcherFor(row));
-        statusLabel.setText(" " + sent + " request(s) sent to Organizer, noted with \""
-                + row.group.name() + "\"");
-        host.log("Scope Highlighter: organizer sync for \"" + row.group.name() + "\": " + sent + " sent");
+        pushNotes(matcherFor(row), null);
+    }
+
+    private void pushAllNotes(JButton button) {
+        pushNotes(null, button);
+    }
+
+    /** Manual push runs off the Swing thread so large Burp histories do not freeze the tab. */
+    private void pushNotes(ScopeGroup matcher, JButton button) {
+        if (button != null) {
+            button.setEnabled(false);
+        }
+        statusLabel.setText(" Sending noted requests to Organizer Inbox...");
+        new SwingWorker<Integer, Void>() {
+            @Override
+            protected Integer doInBackground() {
+                return matcher == null ? host.syncAllToOrganizer() : host.syncToOrganizer(matcher);
+            }
+
+            @Override
+            protected void done() {
+                if (button != null) {
+                    button.setEnabled(true);
+                }
+                try {
+                    int sent = get();
+                    statusLabel.setText(" " + sent + " new noted request(s) sent to Organizer Inbox.");
+                } catch (Exception error) {
+                    statusLabel.setText(" Organizer push failed; see extension output.");
+                    host.log("Scope Manager: organizer push failed: " + error);
+                }
+            }
+        }.execute();
     }
 
     private void showContextMenu(OutlineRow row, MouseEvent e) {
@@ -611,7 +418,7 @@ public final class ScopeHighlighterTab extends JPanel {
             refreshAll();
             reselect(model.lastGroupRow(group));
             host.reapplyHighlights();
-            host.log("Scope Highlighter: added group \"" + group.name() + "\" ("
+            host.log("Scope Manager: added group \"" + group.name() + "\" ("
                     + group.patternCount() + " endpoints, " + group.color().displayName() + ")");
         }
     }
@@ -629,7 +436,7 @@ public final class ScopeHighlighterTab extends JPanel {
             refreshAll();
             reselect(model.firstGroupRow(updated));
             host.reapplyHighlights();
-            host.log("Scope Highlighter: updated group \"" + updated.name() + "\"");
+            host.log("Scope Manager: updated group \"" + updated.name() + "\"");
         }
     }
 
@@ -641,18 +448,18 @@ public final class ScopeHighlighterTab extends JPanel {
         if (row.isGroupRow()) {
             int confirm = JOptionPane.showConfirmDialog(this,
                     "Delete group \"" + row.group.name() + "\" and its "
-                            + row.group.patternCount() + " endpoint(s)?", "Scope Highlighter",
+                            + row.group.patternCount() + " endpoint(s)?", "Scope Manager",
                     JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
             if (confirm == JOptionPane.OK_OPTION) {
                 store.removeGroup(row.groupIndex);
                 refreshAll();
                 host.reapplyHighlights();
-                host.log("Scope Highlighter: deleted group \"" + row.group.name() + "\"");
+                host.log("Scope Manager: deleted group \"" + row.group.name() + "\"");
             }
         } else {
             int confirm = JOptionPane.showConfirmDialog(this,
                     "Remove endpoint \"" + row.endpoint + "\" from \"" + row.group.name() + "\"?",
-                    "Scope Highlighter", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+                    "Scope Manager", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
             if (confirm == JOptionPane.OK_OPTION) {
                 List<String> patterns = new ArrayList<>(row.group.patterns());
                 patterns.remove(row.endpointIndex);
@@ -662,7 +469,7 @@ public final class ScopeHighlighterTab extends JPanel {
                 refreshAll();
                 reselect(model.firstGroupRow(updated));
                 host.reapplyHighlights();
-                host.log("Scope Highlighter: removed endpoint " + row.endpoint);
+                host.log("Scope Manager: removed endpoint " + row.endpoint);
             }
         }
     }
@@ -681,9 +488,8 @@ public final class ScopeHighlighterTab extends JPanel {
 
     private void refreshStatus() {
         String state = store.isAutoHighlightEnabled() ? "auto-highlight ON" : "auto-highlight OFF";
-        String organizer = store.isAutoOrganizerEnabled() ? "organizer ON" : "organizer OFF";
         statusLabel.setText(" " + store.groupCount() + " group(s), "
-                + store.endpointCount() + " endpoint(s) \u2014 " + state + ", " + organizer
+                + store.endpointCount() + " endpoint(s) \u2014 " + state
                 + " \u2014 " + host.loggerSummary()
                 + " \u2014 top group wins when several match");
     }
@@ -713,10 +519,12 @@ public final class ScopeHighlighterTab extends JPanel {
 
     /** Flattens the groups into the outline grid: group row, then its endpoints. */
     public static final class OutlineTableModel extends AbstractTableModel {
-        private static final String[] COLUMNS = {"#", "Endpoint / Group", "Color", "Match", "Sources", "Action"};
+        private static final String[] COLUMNS = {"#", "Endpoint / Group", "Color", "Match", "Sources", "Total request", "With Notes"};
         private final GroupStore store;
         private List<OutlineRow> rows = new ArrayList<>();
         private List<String> sourceLabels = new ArrayList<>();
+        private List<Integer> totalCounts = new ArrayList<>();
+        private List<Integer> noteCounts = new ArrayList<>();
 
         public OutlineTableModel(GroupStore store) {
             this.store = store;
@@ -736,7 +544,23 @@ public final class ScopeHighlighterTab extends JPanel {
             }
             rows = rebuilt;
             sourceLabels = new ArrayList<>();
+            totalCounts = new ArrayList<>();
+            noteCounts = new ArrayList<>();
             fireTableDataChanged();
+        }
+
+        public void setTotalCounts(List<Integer> counts) {
+            totalCounts = counts == null ? new ArrayList<>() : new ArrayList<>(counts);
+            if (getRowCount() > 0) {
+                fireTableRowsUpdated(0, getRowCount() - 1);
+            }
+        }
+
+        public void setNoteCounts(List<Integer> counts) {
+            noteCounts = counts == null ? new ArrayList<>() : new ArrayList<>(counts);
+            if (getRowCount() > 0) {
+                fireTableRowsUpdated(0, getRowCount() - 1);
+            }
         }
 
         /** Parallel to rows: which Burp sources hold data for each row. */
@@ -807,6 +631,10 @@ public final class ScopeHighlighterTab extends JPanel {
                     return row.group.mode().displayName();
                 case 4:
                     return rowIndex < sourceLabels.size() ? sourceLabels.get(rowIndex) : "";
+                case 5:
+                    return rowIndex < totalCounts.size() ? totalCounts.get(rowIndex) : 0;
+                case 6:
+                    return rowIndex < noteCounts.size() ? noteCounts.get(rowIndex) : 0;
                 default:
                     return "";
             }
